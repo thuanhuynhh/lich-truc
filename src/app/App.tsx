@@ -226,7 +226,7 @@ export default function App() {
             <img
             <div>
               <h1>LỊCH LÀM VIỆC KHOA</h1>
-              <p>Khoa Chẩn Đoán Hình Ảnh</p>
+              <p>Khoa Ngoại Tiêu Hóa</p>
             </div>
           </div>
           <div className="user-actions">
@@ -822,7 +822,7 @@ function LoginScreen({ error, onSubmit }: { error: string; onSubmit: (username: 
           style={{ objectFit: "contain", background: "transparent" }}
         />
         <h1>LỊCH LÀM VIỆC KHOA</h1>
-        <p>Khoa Chẩn Đoán Hình Ảnh</p>
+        <p>Khoa Ngoại Tiêu Hóa</p>
         <label>
           Tên đăng nhập
           <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" autoFocus />
@@ -3060,7 +3060,7 @@ function exportPng(data: ScheduleResponse | null, showLunar = false) {
   ctx.font = "700 28px Arial";
   ctx.fillText("LỊCH LÀM VIỆC KHOA", 24, 38);
   ctx.font = "500 16px Arial";
-  ctx.fillText("Khoa Chẩn Đoán Hình Ảnh", 24, 60);
+  ctx.fillText("Khoa Ngoại Tiêu Hóa", 24, 60);
   ctx.fillText(formatWeekLabel(data.weekStart), 24, 80);
 
   let y = titleHeight;

@@ -156,7 +156,7 @@ export function createDutyReportDocument(report: DutyReport): Document {
                 alignment: AlignmentType.CENTER,
                 after: 20
               }),
-              paragraph([run("KHOA CHẨN ĐOÁN HÌNH ẢNH", { bold: true, size: 22 })], {
+              paragraph([run("Khoa Ngoại Tiêu Hóa", { bold: true, size: 22 })], {
                 alignment: AlignmentType.CENTER,
                 after: 0
               })
@@ -213,7 +213,7 @@ export function createDutyReportDocument(report: DutyReport): Document {
   return new Document({
     creator: "Hệ thống Lịch trực CĐHA",
     title: `Báo cáo trực ngày ${displayDate(report.date)}`,
-    description: "Báo cáo trực Khoa Chẩn đoán hình ảnh",
+    description: "Báo cáo trực Khoa Ngoại Tiêu Hóa",
     sections: [
       {
         properties: {
@@ -243,7 +243,7 @@ export function createDutyReportDocument(report: DutyReport): Document {
             run(valueOrFallback(report.reportTime, "07:00"), { bold: true }),
             run(" ngày "),
             run(displayDate(report.reportDate), { bold: true }),
-            run(", tại Khoa Chẩn đoán hình ảnh. Sau khi kết thúc ca trực ngày "),
+            run(", tại Khoa Ngoại Tiêu Hóa. Sau khi kết thúc ca trực ngày "),
             run(displayDate(report.date), { bold: true }),
             run(", chúng tôi xin báo cáo:")
           ], { after: 100 }),
