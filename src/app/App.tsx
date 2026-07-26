@@ -224,9 +224,14 @@ export default function App() {
         <div className="header-top">
           <div className="brand">
             <img
+              className="brand-mark"
+              src="https://bvtn.org.vn/wp-content/uploads/2023/12/logo-bvtn-148x148.png.webp"
+              alt="Logo BVTN"
+              style={{ objectFit: "contain", background: "transparent" }}
+            />
             <div>
               <h1>LỊCH LÀM VIỆC KHOA</h1>
-              <p>Khoa Ngoại Tiêu Hóa</p>
+              <p>Khoa Chẩn Đoán Hình Ảnh</p>
             </div>
           </div>
           <div className="user-actions">
@@ -822,7 +827,7 @@ function LoginScreen({ error, onSubmit }: { error: string; onSubmit: (username: 
           style={{ objectFit: "contain", background: "transparent" }}
         />
         <h1>LỊCH LÀM VIỆC KHOA</h1>
-        <p>Khoa Ngoại Tiêu Hóa</p>
+        <p>Khoa Chẩn Đoán Hình Ảnh</p>
         <label>
           Tên đăng nhập
           <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" autoFocus />
@@ -3060,7 +3065,7 @@ function exportPng(data: ScheduleResponse | null, showLunar = false) {
   ctx.font = "700 28px Arial";
   ctx.fillText("LỊCH LÀM VIỆC KHOA", 24, 38);
   ctx.font = "500 16px Arial";
-  ctx.fillText("Khoa Ngoại Tiêu Hóa", 24, 60);
+  ctx.fillText("Khoa Chẩn Đoán Hình Ảnh", 24, 60);
   ctx.fillText(formatWeekLabel(data.weekStart), 24, 80);
 
   let y = titleHeight;

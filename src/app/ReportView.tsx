@@ -514,7 +514,7 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
               <div className="paper-header">
                 <div className="paper-header-left">
                   <h4>BỆNH VIỆN THỐNG NHẤT</h4>
-                  <h5>Khoa Ngoại Tiêu Hóa</h5>
+                  <h5>KHOA CHẨN ĐOÁN HÌNH ẢNH</h5>
                 </div>
                 <div className="paper-header-right">
                   <h4>CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</h4>
@@ -547,7 +547,7 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
                     required
                   />
                   <span className="print-only underline-date">{formatDisplayDate(reportDate)}</span>
-                  , tại Khoa Ngoại Tiêu Hóa. Sau khi kết thúc ca trực ngày{" "}
+                  , tại Khoa Chẩn đoán hình ảnh. Sau khi kết thúc ca trực ngày{" "}
                   <span className="underline-date">{formatDisplayDate(selectedDate)}</span>
                   , chúng tôi xin báo cáo:
                 </div>
