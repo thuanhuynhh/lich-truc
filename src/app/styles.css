@@ -151,7 +151,7 @@ button:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 18px;
+  padding: calc(14px + env(safe-area-inset-top)) 18px 14px;
   background: rgba(255, 255, 255, .94);
   border-bottom: 1px solid var(--line);
   backdrop-filter: blur(10px);

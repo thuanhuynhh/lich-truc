@@ -1,0 +1,20 @@
+{
+  "name": "Lịch làm việc Khoa Chẩn đoán hình ảnh",
+  "short_name": "Lịch trực",
+  "description": "Lịch làm việc Khoa Chẩn đoán hình ảnh - Bệnh viện Thống Nhất",
+  "lang": "vi",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f5f8f8",
+  "theme_color": "#0f766e",
+  "icons": [
+    {
+      "src": "/favicon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
