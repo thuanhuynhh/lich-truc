@@ -224,11 +224,6 @@ export default function App() {
         <div className="header-top">
           <div className="brand">
             <img
-              className="brand-mark"
-              src="https://bvtn.org.vn/wp-content/uploads/2023/12/logo-bvtn-148x148.png.webp"
-              alt="Logo BVTN"
-              style={{ objectFit: "contain", background: "transparent" }}
-            />
             <div>
               <h1>LỊCH LÀM VIỆC KHOA</h1>
               <p>Khoa Chẩn Đoán Hình Ảnh</p>
