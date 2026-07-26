@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+backups/*.sql
+*.local
+.agents/
+tmp/
+*.log
+tmp_db_usage.txt
