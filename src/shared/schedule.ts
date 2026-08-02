@@ -150,6 +150,32 @@ export function workRotationAssignmentsForStaff(
   return assignments;
 }
 
+export function workRotationAssignmentsForDates(
+  units: ScheduleUnit[],
+  rotations: UnitRotation[],
+  dates: string[],
+  unavailableStaffDays: ReadonlySet<string>
+): Array<{ unitId: number; date: string; staffId: number; slot: number }> {
+  const unitsById = new Map(units.map((unit) => [unit.id, unit]));
+  const assignments: Array<{ unitId: number; date: string; staffId: number; slot: number }> = [];
+
+  for (const rotation of rotations) {
+    const unit = unitsById.get(rotation.unitId);
+    const turns = rotation.turns.filter((turn) => Array.isArray(turn) && turn.length > 0);
+    if (!rotation.enabled || !unit || (unit.type !== "work_bs" && unit.type !== "work_ktv") || turns.length === 0) continue;
+
+    for (const date of dates) {
+      const turnIndex = rotationTurnIndex(rotation.startDate, date, rotation.mode, turns.length);
+      for (const [slot, member] of turns[turnIndex].entries()) {
+        if (unavailableStaffDays.has(`${member.staffId}:${date}`)) continue;
+        assignments.push({ unitId: unit.id, date, staffId: member.staffId, slot });
+      }
+    }
+  }
+
+  return assignments;
+}
+
 export function getWeekDays(weekStart: string): string[] {
   return Array.from({ length: 7 }, (_, index) => addDays(weekStart, index));
 }

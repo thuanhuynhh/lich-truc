@@ -12,6 +12,7 @@ import {
   rotationTurnIndex,
   shouldSyncPostDutyOffDate,
   todayInVietnam,
+  workRotationAssignmentsForDates,
   workRotationAssignmentsForStaff
 } from "../src/shared/schedule";
 import type { ScheduleUnit, UnitRotation } from "../src/shared/types";
@@ -106,6 +107,41 @@ describe("schedule date rules", () => {
 
     expect(workRotationAssignmentsForStaff(units, rotations, 20, "2026-07-21")).toEqual([{ unitId: 20, slot: 0 }]);
     expect(workRotationAssignmentsForStaff(units, rotations, 22, "2026-07-22")).toEqual([]);
+  });
+
+  it("fills rotation work on available days while skipping leave and post-duty days", () => {
+    const units: ScheduleUnit[] = [{
+      id: 10,
+      code: "mri2",
+      section: "II",
+      label: "MRI 2",
+      type: "work_bs",
+      maxPerDay: null,
+      sortOrder: 160,
+      computed: false
+    }];
+    const member = (staffId: number, turnIndex: number) => ({
+      staffId,
+      staffName: `BS ${staffId}`,
+      staffType: "BS" as const,
+      turnIndex,
+      memberOrder: 0
+    });
+    const rotations: UnitRotation[] = [{
+      unitId: 10,
+      startDate: "2026-08-03",
+      mode: "daily",
+      enabled: true,
+      turns: [[member(1, 0)], [member(2, 1)]]
+    }];
+    const unavailable = new Set(["1:2026-08-03", "2:2026-08-04"]);
+
+    expect(workRotationAssignmentsForDates(
+      units,
+      rotations,
+      ["2026-08-03", "2026-08-04", "2026-08-05"],
+      unavailable
+    )).toEqual([{ unitId: 10, date: "2026-08-05", staffId: 1, slot: 0 }]);
   });
 
   it("keeps rotation indexing stable before and after its start date", () => {

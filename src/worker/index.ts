@@ -13,7 +13,7 @@ import type {
   User,
   SystemSettings
 } from "../shared/types";
-import { acceptsStaffTypeForUnit, addDays, conflictsWithDutyLeave, getWeekDays, normalizeWeekStart, postDutyOffDate, shouldSyncPostDutyOffDate, getDayOfWeekLabel, formatDate, isIsoDate, rotationTurnIndex, todayInVietnam, workRotationAssignmentsForStaff } from "../shared/schedule";
+import { acceptsStaffTypeForUnit, addDays, conflictsWithDutyLeave, getWeekDays, normalizeWeekStart, postDutyOffDate, shouldSyncPostDutyOffDate, getDayOfWeekLabel, formatDate, isIsoDate, rotationTurnIndex, todayInVietnam, workRotationAssignmentsForDates, workRotationAssignmentsForStaff } from "../shared/schedule";
 import { getAuditActionValues } from "../shared/audit";
 import { isReportRole, resolveReportSignerName, validateAssignmentInput, validateLeaveInput } from "../shared/validation";
 import { PostgresDatabase, type PostgresPreparedStatement, createPostgresClient } from "./database";
@@ -874,9 +874,17 @@ async function recalculateWorkSchedule(request: Request, env: Env, user: User): 
   const body = await readJson<{ weekStart?: string }>(request);
   const weekStart = normalizeWeekStart(body.weekStart);
   const days = getWeekDays(weekStart);
-  const [bsOffDays, ktvOffDays] = await Promise.all([
+  const [units, rotations, leaveDays, bsOffDays, ktvOffDays] = await Promise.all([
+    listUnits(env),
+    listRotations(env),
+    listLeaveDays(env, days),
     listPostDutyOffDays(env, { type: "work_bs" } as ScheduleUnit, days),
     listPostDutyOffDays(env, { type: "work_ktv" } as ScheduleUnit, days)
+  ]);
+  const unavailableStaffDays = new Set([
+    ...bsOffDays,
+    ...ktvOffDays,
+    ...leaveDays.map((day) => `${day.staffId}:${day.date}`)
   ]);
   const statements: PostgresPreparedStatement[] = [];
   for (const key of bsOffDays) {
@@ -895,10 +903,24 @@ async function recalculateWorkSchedule(request: Request, env: Env, user: User): 
       ).bind(Number(staffId), date)
     );
   }
+  const deleteStatementCount = statements.length;
+  const plannedAssignments = workRotationAssignmentsForDates(units, rotations, days, unavailableStaffDays);
+  for (const assignment of plannedAssignments) {
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO schedule_assignments
+         (unit_id, date, staff_id, slot, confirmed, created_by, updated_by)
+         VALUES (?, ?, ?, ?, 0, ?, ?)
+         ON CONFLICT DO NOTHING`
+      ).bind(assignment.unitId, assignment.date, assignment.staffId, assignment.slot, user.id, user.id)
+    );
+  }
   let deleted = 0;
+  let restored = 0;
   if (statements.length) {
     const results = await env.DB.batch(statements);
-    deleted = results.reduce((sum, result) => sum + (result.meta.changes || 0), 0);
+    deleted = results.slice(0, deleteStatementCount).reduce((sum, result) => sum + (result.meta.changes || 0), 0);
+    restored = results.slice(deleteStatementCount).reduce((sum, result) => sum + (result.meta.changes || 0), 0);
   }
   const repairedSwaps = await reconcileApprovedSwapWorkSchedules(env, days, user.id);
   await audit(
@@ -907,9 +929,9 @@ async function recalculateWorkSchedule(request: Request, env: Env, user: User): 
     "recalculate",
     "schedule",
     null,
-    `Cập nhật lại lịch làm việc tuần ${weekStart}: bỏ ${deleted + repairedSwaps.removed} phân công sai/ngày ra trực, khôi phục ${repairedSwaps.restored} phân công theo tua`
+    `Cập nhật lại lịch làm việc tuần ${weekStart}: bỏ ${deleted + repairedSwaps.removed} phân công sai/ngày ra trực, khôi phục ${restored + repairedSwaps.restored} phân công theo tua`
   );
-  return json({ ok: true, deleted: deleted + repairedSwaps.removed, restored: repairedSwaps.restored });
+  return json({ ok: true, deleted: deleted + repairedSwaps.removed, restored: restored + repairedSwaps.restored });
 }
 
 async function reconcileApprovedSwapWorkSchedules(
@@ -1040,12 +1062,13 @@ async function applyRotation(request: Request, env: Env, user: User, unitId: num
   const statements: PostgresPreparedStatement[] = [];
   const allAssignments = await listAssignments(env, days);
   const allLeaveDays = await listLeaveDays(env, days);
+  const leaveSet = new Set(allLeaveDays.map((day) => `${day.staffId}:${day.date}`));
   const postDutyOffDays = await listPostDutyOffDays(env, unit, days);
   for (const date of days) {
     const idx = rotationTurnIndex(rotation.startDate, date, rotation.mode, turns.length);
     const staffIds = turns[idx].map((member) => member.staffId);
     for (const [slot, staffId] of staffIds.entries()) {
-      if (postDutyOffDays.has(`${staffId}:${date}`)) continue;
+      if (postDutyOffDays.has(`${staffId}:${date}`) || leaveSet.has(`${staffId}:${date}`)) continue;
       const staff = await getStaffById(env, staffId);
       const msg = validateAssignmentInput({
         unit,
