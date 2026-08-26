@@ -19,7 +19,7 @@ export const SESSION_SHORT_LABELS: Record<DaySession, string> = {
   full: "CB"
 };
 
-const WEEKDAY_LABELS = ["CN", "T2", "T3", "T4", "T5", "T6", "T7"];
+const WEEKDAY_LABELS = ["Chủ nhật", "Thứ hai", "Thứ ba", "Thứ tư", "Thứ năm", "Thứ sáu", "Thứ bảy"];
 
 export function isDaySession(value: unknown): value is DaySession {
   return value === "morning" || value === "afternoon" || value === "full";
@@ -147,15 +147,10 @@ export function formatFullDate(value: string): string {
   return `${day}/${month}/${year}`;
 }
 
+/** Thứ của một ngày, ghi rõ bằng chữ: "Thứ sáu", "Chủ nhật". */
 export function getWeekdayLabel(value: string): string {
   const day = new Date(`${value}T00:00:00Z`).getUTCDay();
   return WEEKDAY_LABELS[day] || "";
-}
-
-export function getDayOfWeekLabel(value: string): string {
-  const day = new Date(`${value}T00:00:00Z`).getUTCDay();
-  if (day === 0) return "chủ nhật";
-  return `thứ ${day + 1}`;
 }
 
 /**

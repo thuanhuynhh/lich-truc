@@ -69,11 +69,11 @@ export function ScheduleView({
   if (data.workDays.length === 0) {
     return (
       <div className="empty-schedule-card">
-        <h2>Tháng này chưa có ngày làm việc</h2>
+        <h2>Tuần này chưa có ngày làm việc</h2>
         <p>
           {canSchedule
-            ? "Hãy mở tab “Ngày làm việc” để thêm ngày khám và chọn buổi làm (sáng, chiều hoặc cả buổi)."
-            : "Quản lý chưa mở ngày khám nào cho tháng này."}
+            ? "Chuyển sang tuần khác, hoặc mở tab “Ngày làm việc” để thêm ngày khám và chọn buổi làm (sáng, chiều hoặc cả buổi)."
+            : "Quản lý chưa mở ngày khám nào trong tuần này. Hãy thử chuyển sang tuần khác."}
         </p>
       </div>
     );
@@ -113,7 +113,8 @@ export function ScheduleView({
         <div className="unit-head">VỊ TRÍ KHÁM</div>
         {data.workDays.map((workDay) => (
           <div className="day-head" key={workDay.date}>
-            <strong>{getWeekdayLabel(workDay.date)} {formatDate(workDay.date)}</strong>
+            <strong>{getWeekdayLabel(workDay.date)}</strong>
+            <span className="day-head-date">{formatDate(workDay.date)}</span>
             <span className={`session-badge session-${workDay.session}`}>{SESSION_LABELS[workDay.session]}</span>
             {showLunar && <small>{formatLunarDate(workDay.date)}</small>}
             {workDay.note && <small className="day-head-note" title={workDay.note}>{workDay.note}</small>}

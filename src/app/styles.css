@@ -4229,3 +4229,20 @@ input[type="radio"]:disabled {
   font-weight: 600;
   opacity: .75;
 }
+
+/* Tiêu đề cột: thứ ghi rõ bằng chữ, ngày ở dòng dưới. */
+.day-head strong {
+  font-size: .84rem;
+  line-height: 1.15;
+}
+
+.day-head .day-head-date {
+  font-size: .9rem;
+  font-weight: 700;
+  opacity: 1;
+}
+
+/* Giữ badge buổi nhỏ hơn dòng ngày, vì `.day-head span` đặt cỡ chữ chung. */
+.day-head .session-badge {
+  font-size: .7rem;
+}

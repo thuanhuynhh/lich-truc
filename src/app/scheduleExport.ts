@@ -56,7 +56,8 @@ export function exportCellText(data: ScheduleResponse, row: ExportRow, date: str
 
 function dayHeaderText(workDay: WorkDay, showLunar: boolean): string {
   const parts = [
-    `${getWeekdayLabel(workDay.date)} ${formatDate(workDay.date)}`,
+    getWeekdayLabel(workDay.date),
+    formatDate(workDay.date),
     SESSION_SHORT_LABELS[workDay.session]
   ];
   if (showLunar) parts.push(formatLunarDate(workDay.date));

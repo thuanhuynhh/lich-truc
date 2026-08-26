@@ -18,7 +18,7 @@ import {
   formatFullDate,
   formatMonthLabel,
   formatWeekLabel,
-  getDayOfWeekLabel,
+  getWeekdayLabel,
   monthRange,
   todayInVietnam,
   weekRange
@@ -107,7 +107,7 @@ export function WorkDaysView({
                 <div className="workday-row" role="row" key={workDay.date}>
                   <strong>
                     {formatFullDate(workDay.date)}
-                    <small> ({getDayOfWeekLabel(workDay.date)})</small>
+                    <small> ({getWeekdayLabel(workDay.date)})</small>
                   </strong>
                   {draft ? (
                     <select

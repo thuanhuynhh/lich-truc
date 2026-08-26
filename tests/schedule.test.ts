@@ -9,6 +9,7 @@ import {
   formatMonthLabel,
   formatWeekLabel,
   getWeekDays,
+  getWeekdayLabel,
   isDaySession,
   isIsoDate,
   isIsoMonth,
@@ -100,6 +101,13 @@ describe("tuần làm việc", () => {
   it("chuyển tuần qua mốc cuối tháng", () => {
     expect(addWeeks("2026-09-28", 1)).toBe("2026-10-05");
     expect(addWeeks("2026-09-07", -1)).toBe("2026-08-31");
+  });
+
+  it("ghi rõ thứ bằng chữ thay vì viết tắt", () => {
+    expect(getWeekdayLabel("2026-09-07")).toBe("Thứ hai");
+    expect(getWeekdayLabel("2026-09-04")).toBe("Thứ sáu");
+    expect(getWeekdayLabel("2026-09-05")).toBe("Thứ bảy");
+    expect(getWeekdayLabel("2026-09-06")).toBe("Chủ nhật");
   });
 
   it("hiển thị nhãn tuần", () => {
