@@ -213,15 +213,15 @@ export const api = {
     }),
   deleteUser: (id: number) => request<{ users: User[] }>(`/api/users/${id}`, { method: "DELETE" }),
 
-  audit: (weekStart: string, filters: { actor?: string; action?: string; q?: string } = {}) => {
-    const params = new URLSearchParams({ weekStart });
+  audit: (filters: { actor?: string; action?: string; q?: string } = {}) => {
+    const params = new URLSearchParams();
     Object.entries(filters).forEach(([key, value]) => {
       if (value) params.set(key, value);
     });
-    return request<{ auditLogs: AuditLog[] }>(`/api/audit?${params.toString()}`);
+    const query = params.toString();
+    return request<{ auditLogs: AuditLog[] }>(`/api/audit${query ? `?${query}` : ""}`);
   },
-  clearAudit: (weekStart: string) =>
-    request<{ ok: boolean }>(`/api/audit?weekStart=${weekStart}`, { method: "DELETE" }),
+  clearAudit: () => request<{ ok: boolean; deleted: number }>("/api/audit", { method: "DELETE" }),
 
   getSettings: () => request<SettingsResponse>("/api/settings"),
   saveSettings: (body: Partial<SystemSettings>) =>

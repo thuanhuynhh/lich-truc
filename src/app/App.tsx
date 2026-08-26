@@ -35,10 +35,8 @@ import type {
 import {
   addWeeks,
   formatFullDate,
-  formatMonthLabel,
   formatVietnamDateTime,
   formatWeekLabel,
-  monthOfWeek,
   monthRange,
   normalizeWeekStart,
   todayInVietnam,
@@ -320,7 +318,6 @@ export default function App() {
               onClick={() => setWeekStart(normalizeWeekStart(todayInVietnam()))}
             >
               {formatWeekLabel(weekStart)}
-              <small>{formatMonthLabel(data?.month || monthOfWeek(weekStart))}</small>
             </button>
             <button
               type="button"
@@ -586,7 +583,7 @@ export default function App() {
       )}
 
       {view === "history" && data && (
-        <HistoryView data={data} weekStart={weekStart} isAdmin={isAdmin} notify={notify} />
+        <HistoryView data={data} isAdmin={isAdmin} notify={notify} />
       )}
 
       {view === "settings" && isAdmin && (

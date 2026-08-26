@@ -26,7 +26,6 @@ import {
   isIsoDate,
   monthOfWeek,
   monthRange,
-  normalizeMonth,
   normalizeWeekStart,
   rotationAssignmentsForWorkDays,
   sessionLabel,
@@ -239,7 +238,7 @@ async function routeApi(request: Request, env: Env, url: URL): Promise<Response>
   }
 
   if (path === "/api/audit" && method === "GET") return getAudit(env, url, user);
-  if (path === "/api/audit" && method === "DELETE") return deleteAuditEndpoint(env, url, user);
+  if (path === "/api/audit" && method === "DELETE") return deleteAuditEndpoint(env, user);
 
   if (path === "/api/reports" && method === "GET") return getReportEndpoint(env, url, user);
   if (path === "/api/reports/list" && method === "GET") return listReportsEndpoint(env);
@@ -904,7 +903,7 @@ async function getSchedule(env: Env, url: URL, user: User): Promise<Response> {
     listCoordinators(env),
     listCoordinatorAssignments(env, from, to),
     listRotations(env),
-    listAuditLogs(env, from, to, auditFiltersForUser(user)),
+    listAuditLogs(env, auditFiltersForUser(user)),
     listWorkDaysWithCounts(env, monthBounds.from, monthBounds.to)
   ]);
 
@@ -1724,28 +1723,15 @@ async function applyRotation(
 }
 
 async function getAudit(env: Env, url: URL, user: User): Promise<Response> {
-  const weekStart = normalizeWeekStart(url.searchParams.get("weekStart"));
-  const { from, to } = weekRange(weekStart);
-  const logs = await listAuditLogs(env, from, to, auditFiltersForUser(user, url));
+  const logs = await listAuditLogs(env, auditFiltersForUser(user, url));
   return json({ auditLogs: logs });
 }
 
-async function deleteAuditEndpoint(env: Env, url: URL, user: User): Promise<Response> {
+async function deleteAuditEndpoint(env: Env, user: User): Promise<Response> {
   requireAdmin(user);
-  const weekStart = normalizeWeekStart(url.searchParams.get("weekStart"));
-  const { from, to } = weekRange(weekStart);
-  await env.DB.prepare("DELETE FROM audit_logs WHERE created_at >= ? AND created_at < ?")
-    .bind(`${from}T00:00:00Z`, `${addDays(to, 1)}T00:00:00Z`)
-    .run();
-  await audit(
-    env,
-    user.id,
-    "delete",
-    "audit",
-    null,
-    `Xóa lịch sử thay đổi tuần ${formatFullDate(from)} - ${formatFullDate(to)}`
-  );
-  return json({ ok: true });
+  const result = await env.DB.prepare("DELETE FROM audit_logs").run();
+  await audit(env, user.id, "delete", "audit", null, `Xóa toàn bộ lịch sử thay đổi (${result.meta.changes || 0} dòng)`);
+  return json({ ok: true, deleted: result.meta.changes || 0 });
 }
 
 function auditFiltersForUser(user: User, url?: URL): {
@@ -1762,14 +1748,13 @@ function auditFiltersForUser(user: User, url?: URL): {
   };
 }
 
+/** Log chung của hệ thống, không giới hạn theo tuần hay tháng. */
 async function listAuditLogs(
   env: Env,
-  from: string,
-  to: string,
   filters: { actor?: string; action?: string; q?: string; actorUserId?: number }
 ): Promise<AuditLog[]> {
-  const conditions = ["a.created_at >= ?", "a.created_at < ?"];
-  const bindings: unknown[] = [`${from}T00:00:00Z`, `${addDays(to, 1)}T00:00:00Z`];
+  const conditions: string[] = ["1 = 1"];
+  const bindings: unknown[] = [];
 
   if (filters.actorUserId !== undefined) {
     conditions.push("a.actor_user_id = ?");

@@ -16,7 +16,7 @@ import {
 import { api } from "./api";
 import { PanelTitle, toBase64 } from "./common";
 import type { AuditLog, Department, Role, ScheduleResponse, SystemSettings, User } from "../shared/types";
-import { formatVietnamDateTime, formatWeekLabel } from "../shared/schedule";
+import { formatVietnamDateTime } from "../shared/schedule";
 import { roleLabel } from "../shared/validation";
 
 const ROLES: Role[] = ["admin", "dieu_phoi", "khoa_phong"];
@@ -502,12 +502,10 @@ function ResetPassword({
 
 export function HistoryView({
   data,
-  weekStart,
   isAdmin,
   notify
 }: {
   data: ScheduleResponse;
-  weekStart: string;
   isAdmin: boolean;
   notify: (message: string) => void;
 }) {
@@ -529,14 +527,14 @@ export function HistoryView({
 
   return (
     <main className="panel history-panel">
-      <PanelTitle icon={<ClipboardList size={17} />} title={`Lịch sử thay đổi tuần ${formatWeekLabel(weekStart)}`} />
+      <PanelTitle icon={<ClipboardList size={17} />} title="Lịch sử thay đổi" />
       {isAdmin && (
         <form
           className="history-filters"
           onSubmit={async (event) => {
             event.preventDefault();
             try {
-              const res = await api.audit(weekStart, filters);
+              const res = await api.audit(filters);
               setLogs(res.auditLogs);
               setPage(1);
             } catch (error) {
@@ -579,24 +577,24 @@ export function HistoryView({
             className="tool-btn danger-tool"
             style={{ marginLeft: "auto" }}
             onClick={async () => {
-              if (!window.confirm(`Xóa toàn bộ lịch sử thay đổi tuần ${formatWeekLabel(weekStart)}?`)) return;
+              if (!window.confirm("Xóa toàn bộ lịch sử thay đổi của hệ thống? Không thể hoàn tác.")) return;
               try {
-                await api.clearAudit(weekStart);
-                const res = await api.audit(weekStart, filters);
+                const result = await api.clearAudit();
+                const res = await api.audit(filters);
                 setLogs(res.auditLogs);
                 setPage(1);
-                notify("Đã xóa lịch sử thay đổi của tuần này");
+                notify(`Đã xóa ${result.deleted} dòng lịch sử`);
               } catch (error) {
                 notify(error instanceof Error ? error.message : "Xóa lịch sử thất bại.");
               }
             }}
           >
-            <Trash2 size={16} /> Xóa lịch sử tuần này
+            <Trash2 size={16} /> Xóa toàn bộ lịch sử
           </button>
         </form>
       )}
       <div className="history-list">
-        {logs.length === 0 && <span className="empty-note">Chưa có thay đổi trong tuần này.</span>}
+        {logs.length === 0 && <span className="empty-note">Chưa có thay đổi nào được ghi nhận.</span>}
         {visibleLogs.map((item) => (
           <div className="history-item" key={item.id}>
             <time>{formatVietnamDateTime(item.createdAt) || item.createdAt}</time>

@@ -8,6 +8,7 @@ Repository: <https://github.com/thuanhuynhh/lich-truc> (branch `lich-ksktd`)
 
 - **Ngày làm việc**: lịch không chạy liên tục T2–CN. Quản lý hoặc điều phối mở từng ngày khám và chọn buổi làm: **Sáng**, **Chiều** hoặc **Cả buổi**. Chỉ những ngày đã mở mới thành cột trong bảng lịch.
 - **Xem theo tuần**: bảng lịch hiển thị từng tuần (tối đa 7 cột) để không bị quá nhiều cột khi một tháng có tới 20 ngày khám. Tab "Ngày làm việc" vẫn quản lý theo cả tháng để thêm nhiều ngày một lượt. Tua áp được cho riêng tuần đang xem hoặc cho cả tháng, và luôn giữ đúng nhịp tua dù áp từng tuần một.
+- **Lịch sử thay đổi** là log chung của cả hệ thống, không chia theo tuần hay tháng; lọc theo người thao tác, hành động và nội dung.
 - **Bảng lịch**: hàng đầu là **hàng điều phối** (ai phụ trách buổi khám hôm đó). Các hàng tiếp theo là **vị trí khám** (ví dụ Khám nội, Khám ngoại), gom theo **mục** do quản lý tự thêm trong trang Cấu hình. Mỗi ô chứa một hoặc nhiều khoa phòng, kèm họ tên và số điện thoại người đi làm.
 - **Tua khám**: mỗi vị trí khám có cấu hình tua riêng, mở từ nút "Tua" ngay trên hàng của vị trí đó. Một tua có thể gồm nhiều khoa phòng cùng đứng vị trí đó trong ngày. Tua xoay theo thứ tự **ngày làm việc**, không theo ngày dương lịch. Áp tua vẫn giữ lại họ tên và số điện thoại khoa phòng đã điền.
 - **Đổi ngày làm của điều phối**: điều phối xin đổi ngày làm với một điều phối khác; yêu cầu chỉ có hiệu lực khi người kia đồng ý (qua thông báo trong app hoặc link xác nhận). Quản lý xếp lịch trực tiếp, không cần duyệt.
