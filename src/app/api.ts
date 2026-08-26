@@ -6,9 +6,11 @@ import type {
   Department,
   LoginResponse,
   NotificationItem,
+  Position,
   Role,
   Rotation,
   ScheduleResponse,
+  Section,
   SettingsResponse,
   SwapRequest,
   SwapResponse,
@@ -75,6 +77,35 @@ export const api = {
   deleteDepartment: (id: number) =>
     request<{ departments: Department[] }>(`/api/departments/${id}`, { method: "DELETE" }),
 
+  sections: () => request<{ sections: Section[] }>("/api/sections"),
+  createSection: (body: { label: string }) =>
+    request<{ sections: Section[] }>("/api/sections", {
+      method: "POST",
+      body: JSON.stringify(body)
+    }),
+  updateSection: (id: number, body: Partial<{ label: string; sortOrder: number }>) =>
+    request<{ sections: Section[] }>(`/api/sections/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body)
+    }),
+  deleteSection: (id: number) => request<{ sections: Section[] }>(`/api/sections/${id}`, { method: "DELETE" }),
+
+  positions: () => request<{ positions: Position[] }>("/api/positions"),
+  createPosition: (body: { sectionId: number; label: string }) =>
+    request<{ positions: Position[] }>("/api/positions", {
+      method: "POST",
+      body: JSON.stringify(body)
+    }),
+  updatePosition: (
+    id: number,
+    body: Partial<{ label: string; sectionId: number; sortOrder: number; active: boolean }>
+  ) =>
+    request<{ positions: Position[] }>(`/api/positions/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body)
+    }),
+  deletePosition: (id: number) => request<{ positions: Position[] }>(`/api/positions/${id}`, { method: "DELETE" }),
+
   createWorkDay: (body: { date: string; session: DaySession; note?: string }) =>
     request<{ ok: boolean }>("/api/work-days", {
       method: "POST",
@@ -87,7 +118,13 @@ export const api = {
     }),
   deleteWorkDay: (date: string) => request<{ ok: boolean }>(`/api/work-days/${date}`, { method: "DELETE" }),
 
-  putAssignment: (body: { date: string; departmentId: number; personName?: string; personPhone?: string }) =>
+  putAssignment: (body: {
+    positionId: number;
+    date: string;
+    departmentId: number;
+    personName?: string;
+    personPhone?: string;
+  }) =>
     request<{ ok: boolean }>("/api/schedule/assignment", {
       method: "PUT",
       body: JSON.stringify(body)
@@ -97,7 +134,7 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(body)
     }),
-  moveAssignment: (id: number, body: { date: string }) =>
+  moveAssignment: (id: number, body: { date: string; positionId?: number }) =>
     request<{ ok: boolean }>(`/api/schedule/assignment/${id}/move`, {
       method: "PATCH",
       body: JSON.stringify(body)
@@ -134,17 +171,17 @@ export const api = {
   rejectCoordinatorSwap: (token: string) =>
     request<{ ok: boolean }>(`/api/coordinator-swap/reject?token=${encodeURIComponent(token)}`, { method: "POST" }),
 
-  rotation: () => request<{ rotation: Rotation | null }>("/api/rotation"),
-  saveRotation: (body: { startDate: string; turns: number[][]; enabled?: boolean }) =>
-    request<{ ok: boolean }>("/api/rotation", {
+  rotations: () => request<{ rotations: Rotation[] }>("/api/rotations"),
+  saveRotation: (positionId: number, body: { startDate: string; turns: number[][]; enabled?: boolean }) =>
+    request<{ ok: boolean }>(`/api/rotations/${positionId}`, {
       method: "PUT",
       body: JSON.stringify(body)
     }),
-  applyRotation: (body: { month: string }) =>
-    request<{ ok: boolean; created: number; restored: number }>("/api/rotation/apply", {
-      method: "POST",
-      body: JSON.stringify(body)
-    }),
+  applyRotation: (positionId: number | null, body: { month: string }) =>
+    request<{ ok: boolean; created: number; restored: number }>(
+      positionId === null ? "/api/rotations/apply" : `/api/rotations/${positionId}/apply`,
+      { method: "POST", body: JSON.stringify(body) }
+    ),
 
   users: () => request<{ users: User[] }>("/api/users"),
   createUser: (body: {
@@ -217,8 +254,7 @@ export const api = {
     }),
   deleteReport: (date: string) => request<{ ok: boolean }>(`/api/reports?date=${date}`, { method: "DELETE" }),
   saveAttendance: (body: {
-    date: string;
-    departmentId?: number;
+    assignmentId: number;
     present?: boolean;
     note?: string;
     signature?: string;
@@ -231,7 +267,7 @@ export const api = {
     }),
   signReport: (body: {
     date: string;
-    role: "khoa_phong" | "dieu_phoi";
+    role: "dieu_phoi";
     signature?: string;
     signerName: string;
     useStoredSignature?: boolean;

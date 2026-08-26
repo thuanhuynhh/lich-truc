@@ -6,6 +6,9 @@ import type { AttendanceEntry, WorkReport } from "../src/shared/types";
 
 function attendance(departmentName: string, present: boolean): AttendanceEntry {
   return {
+    assignmentId: departmentName.length,
+    positionId: 1,
+    positionLabel: "Khám nội",
     departmentId: departmentName.length,
     departmentName,
     personName: "Nguyễn Văn A",

@@ -1,4 +1,4 @@
-import type { Assignment, Department, Role, SignerRole, WorkReport } from "./types";
+import type { Assignment, Department, Position, Role, SignerRole, WorkReport } from "./types";
 import { canEditPersonOnDate } from "./schedule";
 
 const PHONE_PATTERN = /^[0-9+][0-9\s.-]{7,19}$/;
@@ -42,6 +42,7 @@ export function validatePersonInput(params: { personName: unknown; personPhone: 
 }
 
 export function validateAssignmentInput(params: {
+  position: Position;
   department: Department;
   date: string;
   workDayDates: string[];
@@ -51,14 +52,18 @@ export function validateAssignmentInput(params: {
   if (!params.workDayDates.includes(params.date)) {
     return "Ngày này chưa được mở làm việc. Hãy thêm ngày làm trước.";
   }
+  if (!params.position.active) return `Vị trí ${params.position.label} đã ngừng hoạt động.`;
   if (!params.department.active) return "Khoa phòng này đã ngừng hoạt động.";
   const duplicated = params.assignments.some(
     (assignment) =>
       assignment.date === params.date &&
+      assignment.positionId === params.position.id &&
       assignment.departmentId === params.department.id &&
       assignment.id !== params.replacingAssignmentId
   );
-  if (duplicated) return `${params.department.name} đã có trong ngày ${params.date}.`;
+  if (duplicated) {
+    return `${params.department.name} đã có ở vị trí ${params.position.label} ngày ${params.date}.`;
+  }
   return null;
 }
 

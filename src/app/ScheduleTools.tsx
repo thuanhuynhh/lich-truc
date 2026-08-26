@@ -1,6 +1,17 @@
 import { useState } from "react";
-import { CalendarDays, CalendarPlus, ListOrdered, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
-import type { DaySession, Department, Rotation, ScheduleResponse, WorkDay } from "../shared/types";
+import {
+  CalendarDays,
+  CalendarPlus,
+  ChevronDown,
+  ChevronUp,
+  LayoutList,
+  ListOrdered,
+  Plus,
+  RefreshCw,
+  Save,
+  Trash2
+} from "lucide-react";
+import type { DaySession, Department, Position, Rotation, ScheduleResponse, Section, WorkDay } from "../shared/types";
 import {
   DAY_SESSIONS,
   SESSION_LABELS,
@@ -190,6 +201,7 @@ export function WorkDaysView({
 
 export function RotationDialog({
   month,
+  position,
   departments,
   rotation,
   workDayCount,
@@ -198,6 +210,7 @@ export function RotationDialog({
   onApply
 }: {
   month: string;
+  position: Position;
   departments: Department[];
   rotation: Rotation | null;
   workDayCount: number;
@@ -227,10 +240,11 @@ export function RotationDialog({
       <div className="modal-panel">
         <div className="modal-head">
           <div>
-            <h2>Tua khám của khoa phòng</h2>
+            <h2>Tua khám · {position.label}</h2>
             <p>
               Tua 1 áp cho ngày làm đầu tiên tính từ ngày bắt đầu, các ngày làm tiếp theo xoay lần lượt theo thứ tự tua.
-              Tháng {formatMonthLabel(month).toLowerCase()} đang có {workDayCount} ngày làm.
+              Mỗi tua có thể gồm nhiều khoa phòng cùng đứng vị trí này. Tháng{" "}
+              {formatMonthLabel(month).toLowerCase()} đang có {workDayCount} ngày làm.
             </p>
           </div>
           <button type="button" className="icon-btn" onClick={onClose} aria-label="Đóng">×</button>
@@ -348,5 +362,302 @@ export function RotationDialog({
         </div>
       </div>
     </div>
+  );
+}
+
+
+/** Quản lý mục lịch và vị trí khám. Chỉ tài khoản quản lý dùng được. */
+export function PositionsManager({
+  sections,
+  positions,
+  onCreateSection,
+  onUpdateSection,
+  onDeleteSection,
+  onCreatePosition,
+  onUpdatePosition,
+  onDeletePosition
+}: {
+  sections: Section[];
+  positions: Position[];
+  onCreateSection: (label: string) => Promise<boolean>;
+  onUpdateSection: (id: number, payload: { label?: string; sortOrder?: number }) => void;
+  onDeleteSection: (section: Section) => void;
+  onCreatePosition: (sectionId: number, label: string) => Promise<boolean>;
+  onUpdatePosition: (
+    id: number,
+    payload: { label?: string; sectionId?: number; sortOrder?: number; active?: boolean }
+  ) => void;
+  onDeletePosition: (position: Position) => void;
+}) {
+  const [sectionLabel, setSectionLabel] = useState("");
+  const [editingSection, setEditingSection] = useState<Record<number, string>>({});
+  const [positionLabel, setPositionLabel] = useState<Record<number, string>>({});
+  const [editingPosition, setEditingPosition] = useState<Record<number, string>>({});
+
+  const ordered = [...sections].sort((left, right) => left.sortOrder - right.sortOrder);
+
+  function move(list: Array<{ id: number; sortOrder: number }>, index: number, delta: number) {
+    const target = list[index + delta];
+    if (!target) return null;
+    return { id: list[index].id, sortOrder: target.sortOrder, otherId: target.id, otherSortOrder: list[index].sortOrder };
+  }
+
+  return (
+    <section className="settings-panel profile-settings-card">
+      <div className="settings-panel-title">
+        <LayoutList size={20} />
+        <span>Mục và vị trí khám</span>
+      </div>
+      <p className="profile-settings-intro">
+        Mỗi vị trí khám là một hàng của bảng lịch và có cấu hình tua riêng. Xóa mục sẽ xóa toàn bộ vị trí bên trong.
+      </p>
+
+      <form
+        className="form-inline"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          if (!sectionLabel.trim()) return;
+          if (await onCreateSection(sectionLabel.trim())) setSectionLabel("");
+        }}
+      >
+        <input
+          value={sectionLabel}
+          onChange={(event) => setSectionLabel(event.target.value)}
+          placeholder="Tên mục, ví dụ: I. KHÁM LÂM SÀNG"
+          aria-label="Tên mục lịch"
+          maxLength={160}
+        />
+        <button type="submit" className="primary-btn"><Plus size={16} /> Thêm mục</button>
+      </form>
+
+      {ordered.length === 0 && <span className="empty-note">Chưa có mục nào. Hãy thêm mục đầu tiên.</span>}
+
+      <div className="section-manager">
+        {ordered.map((section, sectionIndex) => {
+          const own = positions
+            .filter((position) => position.sectionId === section.id)
+            .sort((left, right) => left.sortOrder - right.sortOrder);
+          const sectionDraft = editingSection[section.id];
+          return (
+            <article className="section-card" key={section.id}>
+              <header className="section-card-head">
+                {sectionDraft !== undefined ? (
+                  <input
+                    value={sectionDraft}
+                    aria-label={`Tên mục ${section.label}`}
+                    onChange={(event) =>
+                      setEditingSection((prev) => ({ ...prev, [section.id]: event.target.value }))
+                    }
+                  />
+                ) : (
+                  <h3>{section.label}</h3>
+                )}
+                <div className="section-card-actions">
+                  {sectionDraft !== undefined ? (
+                    <>
+                      <button
+                        type="button"
+                        className="tool-btn"
+                        onClick={() => {
+                          const next = sectionDraft.trim();
+                          if (next) onUpdateSection(section.id, { label: next });
+                          setEditingSection((prev) => {
+                            const copy = { ...prev };
+                            delete copy[section.id];
+                            return copy;
+                          });
+                        }}
+                      >
+                        <Save size={15} /> Lưu
+                      </button>
+                      <button
+                        type="button"
+                        className="tool-btn"
+                        onClick={() =>
+                          setEditingSection((prev) => {
+                            const copy = { ...prev };
+                            delete copy[section.id];
+                            return copy;
+                          })
+                        }
+                      >
+                        Hủy
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="tool-btn"
+                      onClick={() => setEditingSection((prev) => ({ ...prev, [section.id]: section.label }))}
+                    >
+                      Sửa
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="tool-btn"
+                    disabled={sectionIndex === 0}
+                    aria-label="Đưa mục lên trên"
+                    onClick={() => {
+                      const swap = move(ordered, sectionIndex, -1);
+                      if (!swap) return;
+                      onUpdateSection(swap.id, { sortOrder: swap.sortOrder });
+                      onUpdateSection(swap.otherId, { sortOrder: swap.otherSortOrder });
+                    }}
+                  >
+                    <ChevronUp size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    className="tool-btn"
+                    disabled={sectionIndex === ordered.length - 1}
+                    aria-label="Đưa mục xuống dưới"
+                    onClick={() => {
+                      const swap = move(ordered, sectionIndex, 1);
+                      if (!swap) return;
+                      onUpdateSection(swap.id, { sortOrder: swap.sortOrder });
+                      onUpdateSection(swap.otherId, { sortOrder: swap.otherSortOrder });
+                    }}
+                  >
+                    <ChevronDown size={15} />
+                  </button>
+                  <button type="button" className="ghost-danger" onClick={() => onDeleteSection(section)}>
+                    <Trash2 size={15} /> Xóa mục
+                  </button>
+                </div>
+              </header>
+
+              <div className="position-list">
+                {own.length === 0 && <span className="empty-note">Chưa có vị trí khám trong mục này.</span>}
+                {own.map((position, positionIndex) => {
+                  const draft = editingPosition[position.id];
+                  return (
+                    <div className="position-row" key={position.id}>
+                      {draft !== undefined ? (
+                        <input
+                          value={draft}
+                          aria-label={`Tên vị trí ${position.label}`}
+                          onChange={(event) =>
+                            setEditingPosition((prev) => ({ ...prev, [position.id]: event.target.value }))
+                          }
+                        />
+                      ) : (
+                        <span className="position-name">
+                          {position.label}
+                          {!position.active && <em> (đã tắt)</em>}
+                        </span>
+                      )}
+                      <div className="position-row-actions">
+                        {draft !== undefined ? (
+                          <>
+                            <button
+                              type="button"
+                              className="tool-btn"
+                              onClick={() => {
+                                const next = draft.trim();
+                                if (next) onUpdatePosition(position.id, { label: next });
+                                setEditingPosition((prev) => {
+                                  const copy = { ...prev };
+                                  delete copy[position.id];
+                                  return copy;
+                                });
+                              }}
+                            >
+                              <Save size={15} /> Lưu
+                            </button>
+                            <button
+                              type="button"
+                              className="tool-btn"
+                              onClick={() =>
+                                setEditingPosition((prev) => {
+                                  const copy = { ...prev };
+                                  delete copy[position.id];
+                                  return copy;
+                                })
+                              }
+                            >
+                              Hủy
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            className="tool-btn"
+                            onClick={() => setEditingPosition((prev) => ({ ...prev, [position.id]: position.label }))}
+                          >
+                            Sửa
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="tool-btn"
+                          disabled={positionIndex === 0}
+                          aria-label="Đưa vị trí lên trên"
+                          onClick={() => {
+                            const swap = move(own, positionIndex, -1);
+                            if (!swap) return;
+                            onUpdatePosition(swap.id, { sortOrder: swap.sortOrder });
+                            onUpdatePosition(swap.otherId, { sortOrder: swap.otherSortOrder });
+                          }}
+                        >
+                          <ChevronUp size={15} />
+                        </button>
+                        <button
+                          type="button"
+                          className="tool-btn"
+                          disabled={positionIndex === own.length - 1}
+                          aria-label="Đưa vị trí xuống dưới"
+                          onClick={() => {
+                            const swap = move(own, positionIndex, 1);
+                            if (!swap) return;
+                            onUpdatePosition(swap.id, { sortOrder: swap.sortOrder });
+                            onUpdatePosition(swap.otherId, { sortOrder: swap.otherSortOrder });
+                          }}
+                        >
+                          <ChevronDown size={15} />
+                        </button>
+                        <button
+                          type="button"
+                          className="tool-btn"
+                          onClick={() => onUpdatePosition(position.id, { active: !position.active })}
+                        >
+                          {position.active ? "Tắt" : "Bật"}
+                        </button>
+                        <button type="button" className="ghost-danger" onClick={() => onDeletePosition(position)}>
+                          <Trash2 size={15} /> Xóa
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <form
+                className="form-inline"
+                onSubmit={async (event) => {
+                  event.preventDefault();
+                  const label = (positionLabel[section.id] || "").trim();
+                  if (!label) return;
+                  if (await onCreatePosition(section.id, label)) {
+                    setPositionLabel((prev) => ({ ...prev, [section.id]: "" }));
+                  }
+                }}
+              >
+                <input
+                  value={positionLabel[section.id] || ""}
+                  onChange={(event) =>
+                    setPositionLabel((prev) => ({ ...prev, [section.id]: event.target.value }))
+                  }
+                  placeholder="Tên vị trí khám, ví dụ: Khám nội"
+                  aria-label={`Thêm vị trí khám vào ${section.label}`}
+                  maxLength={160}
+                />
+                <button type="submit" className="tool-btn"><Plus size={15} /> Thêm vị trí</button>
+              </form>
+            </article>
+          );
+        })}
+      </div>
+    </section>
   );
 }

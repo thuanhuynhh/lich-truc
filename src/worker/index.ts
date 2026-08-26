@@ -6,10 +6,12 @@ import type {
   DaySession,
   Department,
   NotificationItem,
+  Position,
   Role,
   Rotation,
   RotationMember,
   ScheduleResponse,
+  Section,
   SwapRequest,
   SystemSettings,
   User,
@@ -84,16 +86,16 @@ export function rotationDepartmentLookup(departmentIds: number[]): { sql: string
   };
 }
 
-export function rotationMembersInsert(turns: number[][]): { sql: string; bindings: number[] } {
+export function rotationMembersInsert(positionId: number, turns: number[][]): { sql: string; bindings: number[] } {
   const bindings: number[] = [];
   const values = turns.flatMap((turn, turnIndex) =>
     turn.map((departmentId, memberOrder) => {
-      bindings.push(turnIndex, departmentId, memberOrder);
-      return "(?, ?, ?)";
+      bindings.push(positionId, turnIndex, departmentId, memberOrder);
+      return "(?, ?, ?, ?)";
     })
   );
   return {
-    sql: `INSERT INTO rotation_members (turn_index, department_id, member_order) VALUES ${values.join(", ")}`,
+    sql: `INSERT INTO rotation_members (position_id, turn_index, department_id, member_order) VALUES ${values.join(", ")}`,
     bindings
   };
 }
@@ -166,6 +168,22 @@ async function routeApi(request: Request, env: Env, url: URL): Promise<Response>
     return deleteDepartment(env, user, idFromPath(path));
   }
 
+  if (path === "/api/sections" && method === "GET") return json({ sections: await listSections(env) });
+  if (path === "/api/sections" && method === "POST") return createSection(request, env, user);
+  if (path.match(/^\/api\/sections\/\d+$/) && method === "PATCH") {
+    return updateSection(request, env, user, idFromPath(path));
+  }
+  if (path.match(/^\/api\/sections\/\d+$/) && method === "DELETE") return deleteSection(env, user, idFromPath(path));
+
+  if (path === "/api/positions" && method === "GET") return json({ positions: await listPositions(env) });
+  if (path === "/api/positions" && method === "POST") return createPosition(request, env, user);
+  if (path.match(/^\/api\/positions\/\d+$/) && method === "PATCH") {
+    return updatePosition(request, env, user, idFromPath(path));
+  }
+  if (path.match(/^\/api\/positions\/\d+$/) && method === "DELETE") {
+    return deletePosition(env, user, idFromPath(path));
+  }
+
   if (path === "/api/users" && method === "GET") return listUsersEndpoint(env, user);
   if (path === "/api/users" && method === "POST") return createUser(request, env, user);
   if (path.match(/^\/api\/users\/\d+$/) && method === "PATCH") return updateUser(request, env, user, idFromPath(path));
@@ -208,9 +226,14 @@ async function routeApi(request: Request, env: Env, url: URL): Promise<Response>
   if (path === "/api/coordinator-swap/accept" && method === "POST") return acceptSwapEndpoint(env, url, user);
   if (path === "/api/coordinator-swap/reject" && method === "POST") return rejectSwapEndpoint(env, url, user);
 
-  if (path === "/api/rotation" && method === "GET") return json({ rotation: await loadRotation(env) });
-  if (path === "/api/rotation" && method === "PUT") return saveRotation(request, env, user);
-  if (path === "/api/rotation/apply" && method === "POST") return applyRotation(request, env, user);
+  if (path === "/api/rotations" && method === "GET") return json({ rotations: await listRotations(env) });
+  if (path === "/api/rotations/apply" && method === "POST") return applyRotation(request, env, user, null);
+  if (path.match(/^\/api\/rotations\/\d+$/) && method === "PUT") {
+    return saveRotation(request, env, user, idFromPath(path));
+  }
+  if (path.match(/^\/api\/rotations\/\d+\/apply$/) && method === "POST") {
+    return applyRotation(request, env, user, Number(path.split("/").at(-2)));
+  }
 
   if (path === "/api/audit" && method === "GET") return getAudit(env, url, user);
   if (path === "/api/audit" && method === "DELETE") return deleteAuditEndpoint(env, url, user);
@@ -423,6 +446,139 @@ async function deleteDepartment(env: Env, user: User, id: number): Promise<Respo
   return json({ departments: await listDepartments(env) });
 }
 
+async function listSections(env: Env): Promise<Section[]> {
+  const { results } = await env.DB.prepare(
+    "SELECT id, label, sort_order FROM sections ORDER BY sort_order, id"
+  ).all<SectionRow>();
+  return results.map(mapSectionRow);
+}
+
+async function nextSortOrder(env: Env, table: "sections" | "positions", sectionId?: number): Promise<number> {
+  const row = sectionId === undefined
+    ? await env.DB.prepare(`SELECT COALESCE(MAX(sort_order), 0) AS value FROM ${table}`).first<{ value: number }>()
+    : await env.DB.prepare(`SELECT COALESCE(MAX(sort_order), 0) AS value FROM ${table} WHERE section_id = ?`)
+        .bind(sectionId)
+        .first<{ value: number }>();
+  return Number(row?.value || 0) + 10;
+}
+
+async function createSection(request: Request, env: Env, user: User): Promise<Response> {
+  requireAdmin(user);
+  const body = await readJson<{ label?: string }>(request);
+  const label = String(body.label || "").trim();
+  if (!label) throw new HttpError(400, "Tên mục không hợp lệ.");
+  if (label.length > 160) throw new HttpError(400, "Tên mục không được quá 160 ký tự.");
+
+  const result = await env.DB.prepare("INSERT INTO sections (label, sort_order) VALUES (?, ?)")
+    .bind(label, await nextSortOrder(env, "sections"))
+    .run();
+  await audit(env, user.id, "create", "section", result.meta.last_row_id, `Thêm mục lịch: ${label}`);
+  return json({ sections: await listSections(env) }, 201);
+}
+
+async function updateSection(request: Request, env: Env, user: User, id: number): Promise<Response> {
+  requireAdmin(user);
+  const body = await readJson<{ label?: string; sortOrder?: number }>(request);
+  const current = await env.DB.prepare("SELECT id, label, sort_order FROM sections WHERE id = ?")
+    .bind(id)
+    .first<SectionRow>();
+  if (!current) throw new HttpError(404, "Không tìm thấy mục lịch.");
+
+  const label = body.label === undefined ? current.label : String(body.label).trim();
+  if (!label) throw new HttpError(400, "Tên mục không hợp lệ.");
+  const sortOrder = body.sortOrder === undefined ? current.sort_order : Number(body.sortOrder);
+  if (!Number.isInteger(sortOrder)) throw new HttpError(400, "Thứ tự mục không hợp lệ.");
+
+  await env.DB.prepare("UPDATE sections SET label = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    .bind(label, sortOrder, id)
+    .run();
+  await audit(env, user.id, "update", "section", id, `Cập nhật mục lịch: ${label}`);
+  return json({ sections: await listSections(env) });
+}
+
+async function deleteSection(env: Env, user: User, id: number): Promise<Response> {
+  requireAdmin(user);
+  const current = await env.DB.prepare("SELECT label FROM sections WHERE id = ?").bind(id).first<{ label: string }>();
+  if (!current) throw new HttpError(404, "Không tìm thấy mục lịch.");
+  await env.DB.prepare("DELETE FROM sections WHERE id = ?").bind(id).run();
+  await audit(env, user.id, "delete", "section", id, `Xóa mục lịch: ${current.label}`);
+  return json({ sections: await listSections(env) });
+}
+
+async function listPositions(env: Env): Promise<Position[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT p.id, p.section_id, p.label, p.sort_order, p.active
+     FROM positions p
+     JOIN sections s ON s.id = p.section_id
+     ORDER BY s.sort_order, s.id, p.sort_order, p.id`
+  ).all<PositionRow>();
+  return results.map(mapPositionRow);
+}
+
+async function getPositionById(env: Env, id: number): Promise<Position> {
+  const row = await env.DB.prepare(
+    "SELECT id, section_id, label, sort_order, active FROM positions WHERE id = ?"
+  ).bind(id).first<PositionRow>();
+  if (!row) throw new HttpError(404, "Không tìm thấy vị trí khám.");
+  return mapPositionRow(row);
+}
+
+async function createPosition(request: Request, env: Env, user: User): Promise<Response> {
+  requireAdmin(user);
+  const body = await readJson<{ sectionId?: number; label?: string }>(request);
+  const sectionId = Number(body.sectionId || 0);
+  const label = String(body.label || "").trim();
+  if (!sectionId) throw new HttpError(400, "Hãy chọn mục cho vị trí khám.");
+  if (!label) throw new HttpError(400, "Tên vị trí khám không hợp lệ.");
+  if (label.length > 160) throw new HttpError(400, "Tên vị trí khám không được quá 160 ký tự.");
+
+  const section = await env.DB.prepare("SELECT id FROM sections WHERE id = ?").bind(sectionId).first();
+  if (!section) throw new HttpError(404, "Không tìm thấy mục lịch.");
+
+  const result = await env.DB.prepare(
+    "INSERT INTO positions (section_id, label, sort_order, active) VALUES (?, ?, ?, 1)"
+  ).bind(sectionId, label, await nextSortOrder(env, "positions", sectionId)).run();
+  await audit(env, user.id, "create", "position", result.meta.last_row_id, `Thêm vị trí khám: ${label}`);
+  return json({ positions: await listPositions(env) }, 201);
+}
+
+async function updatePosition(request: Request, env: Env, user: User, id: number): Promise<Response> {
+  requireAdmin(user);
+  const body = await readJson<{ label?: string; sectionId?: number; sortOrder?: number; active?: boolean }>(request);
+  const current = await env.DB.prepare(
+    "SELECT id, section_id, label, sort_order, active FROM positions WHERE id = ?"
+  ).bind(id).first<PositionRow>();
+  if (!current) throw new HttpError(404, "Không tìm thấy vị trí khám.");
+
+  const label = body.label === undefined ? current.label : String(body.label).trim();
+  if (!label) throw new HttpError(400, "Tên vị trí khám không hợp lệ.");
+  const sectionId = body.sectionId === undefined ? current.section_id : Number(body.sectionId);
+  if (!sectionId) throw new HttpError(400, "Mục lịch không hợp lệ.");
+  if (sectionId !== current.section_id) {
+    const section = await env.DB.prepare("SELECT id FROM sections WHERE id = ?").bind(sectionId).first();
+    if (!section) throw new HttpError(404, "Không tìm thấy mục lịch.");
+  }
+  const sortOrder = body.sortOrder === undefined ? current.sort_order : Number(body.sortOrder);
+  if (!Number.isInteger(sortOrder)) throw new HttpError(400, "Thứ tự vị trí không hợp lệ.");
+  const active = body.active === undefined ? !!current.active : body.active;
+
+  await env.DB.prepare(
+    `UPDATE positions SET section_id = ?, label = ?, sort_order = ?, active = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?`
+  ).bind(sectionId, label, sortOrder, active ? 1 : 0, id).run();
+  await audit(env, user.id, "update", "position", id, `Cập nhật vị trí khám: ${label}`);
+  return json({ positions: await listPositions(env) });
+}
+
+async function deletePosition(env: Env, user: User, id: number): Promise<Response> {
+  requireAdmin(user);
+  const current = await env.DB.prepare("SELECT label FROM positions WHERE id = ?").bind(id).first<{ label: string }>();
+  if (!current) throw new HttpError(404, "Không tìm thấy vị trí khám.");
+  await env.DB.prepare("DELETE FROM positions WHERE id = ?").bind(id).run();
+  await audit(env, user.id, "delete", "position", id, `Xóa vị trí khám: ${current.label}`);
+  return json({ positions: await listPositions(env) });
+}
+
 async function listUsers(env: Env): Promise<User[]> {
   const { results } = await env.DB.prepare(
     `SELECT u.id, u.username, u.role, u.department_id, u.full_name, d.name AS department_name, u.signature
@@ -614,6 +770,7 @@ async function listNotifications(env: Env, user: User): Promise<Array<Omit<Notif
        FROM assignments a
        JOIN work_days w ON w.date = a.date
        WHERE a.department_id = ? AND a.date BETWEEN ? AND ? AND TRIM(a.person_name) = ''
+       GROUP BY a.date, w.session
        ORDER BY a.date`
     ).bind(user.departmentId, today, horizon).all<{ date: string; session: DaySession }>();
     for (const row of missing) {
@@ -632,8 +789,9 @@ async function listNotifications(env: Env, user: User): Promise<Array<Omit<Notif
       `SELECT a.date
        FROM assignments a
        JOIN work_reports r ON r.date = a.date
-       LEFT JOIN work_report_attendance att ON att.date = a.date AND att.department_id = a.department_id
+       LEFT JOIN work_report_attendance att ON att.assignment_id = a.id
        WHERE a.department_id = ? AND a.date BETWEEN ? AND ? AND att.signature IS NULL
+       GROUP BY a.date
        ORDER BY a.date DESC`
     ).bind(user.departmentId, backlog, today).all<{ date: string }>();
     for (const row of unsigned) {
@@ -720,25 +878,38 @@ async function getSchedule(env: Env, url: URL, user: User): Promise<Response> {
   const month = normalizeMonth(url.searchParams.get("month"));
   const { from, to } = monthRange(month);
   const settings = await getSettings(env);
-  const [workDays, departments, assignments, coordinators, coordinatorAssignments, rotation, auditLogs] =
-    await Promise.all([
-      listWorkDays(env, from, to),
-      listDepartments(env),
-      listAssignments(env, from, to),
-      listCoordinators(env),
-      listCoordinatorAssignments(env, from, to),
-      loadRotation(env),
-      listAuditLogs(env, from, to, auditFiltersForUser(user))
-    ]);
-
-  const response: ScheduleResponse = {
-    month,
+  const [
     workDays,
+    sections,
+    positions,
     departments,
     assignments,
     coordinators,
     coordinatorAssignments,
-    rotation,
+    rotations,
+    auditLogs
+  ] = await Promise.all([
+    listWorkDays(env, from, to),
+    listSections(env),
+    listPositions(env),
+    listDepartments(env),
+    listAssignments(env, from, to),
+    listCoordinators(env),
+    listCoordinatorAssignments(env, from, to),
+    listRotations(env),
+    listAuditLogs(env, from, to, auditFiltersForUser(user))
+  ]);
+
+  const response: ScheduleResponse = {
+    month,
+    workDays,
+    sections,
+    positions,
+    departments,
+    assignments,
+    coordinators,
+    coordinatorAssignments,
+    rotations,
     auditLogs,
     lockPersonOnWorkDay: settings.lock_person_on_workday
   };
@@ -754,11 +925,12 @@ async function listWorkDays(env: Env, from: string, to: string): Promise<WorkDay
 
 async function listAssignments(env: Env, from: string, to: string): Promise<Assignment[]> {
   const { results } = await env.DB.prepare(
-    `SELECT a.id, a.date, a.department_id, d.name AS department_name, a.person_name, a.person_phone, a.updated_at
+    `SELECT a.id, a.position_id, a.date, a.department_id, d.name AS department_name,
+            a.person_name, a.person_phone, a.member_order, a.updated_at
      FROM assignments a
      JOIN departments d ON d.id = a.department_id
      WHERE a.date BETWEEN ? AND ?
-     ORDER BY a.date, a.member_order, d.sort_order, d.name`
+     ORDER BY a.date, a.position_id, a.member_order, d.sort_order, d.name`
   ).bind(from, to).all<AssignmentRow>();
   return results.map(mapAssignmentRow);
 }
@@ -815,15 +987,28 @@ async function deleteWorkDay(env: Env, user: User, date: string): Promise<Respon
 
 async function putAssignment(request: Request, env: Env, user: User): Promise<Response> {
   requireScheduler(user);
-  const body = await readJson<{ date?: string; departmentId?: number; personName?: string; personPhone?: string }>(request);
+  const body = await readJson<{
+    positionId?: number;
+    date?: string;
+    departmentId?: number;
+    personName?: string;
+    personPhone?: string;
+  }>(request);
   const date = String(body.date || "").slice(0, 10);
+  const positionId = Number(body.positionId || 0);
   const departmentId = Number(body.departmentId || 0);
-  if (!isIsoDate(date) || !departmentId) throw new HttpError(400, "Thiếu ngày làm hoặc khoa phòng.");
+  if (!isIsoDate(date) || !positionId || !departmentId) {
+    throw new HttpError(400, "Thiếu vị trí khám, ngày làm hoặc khoa phòng.");
+  }
 
-  const department = await getDepartmentById(env, departmentId);
-  const workDays = await listWorkDays(env, date, date);
-  const assignments = await listAssignments(env, date, date);
+  const [position, department, workDays, assignments] = await Promise.all([
+    getPositionById(env, positionId),
+    getDepartmentById(env, departmentId),
+    listWorkDays(env, date, date),
+    listAssignments(env, date, date)
+  ]);
   const message = validateAssignmentInput({
+    position,
     department,
     date,
     workDayDates: workDays.map((workDay) => workDay.date),
@@ -833,19 +1018,19 @@ async function putAssignment(request: Request, env: Env, user: User): Promise<Re
 
   const personName = String(body.personName || "").trim();
   const personPhone = normalizePhone(body.personPhone);
-  const memberOrder = assignments.filter((assignment) => assignment.date === date).length;
+  const memberOrder = assignments.filter((assignment) => assignment.positionId === positionId).length;
 
   const result = await env.DB.prepare(
-    `INSERT INTO assignments (date, department_id, person_name, person_phone, member_order, created_by, updated_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).bind(date, departmentId, personName, personPhone, memberOrder, user.id, user.id).run();
+    `INSERT INTO assignments (position_id, date, department_id, person_name, person_phone, member_order, created_by, updated_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(positionId, date, departmentId, personName, personPhone, memberOrder, user.id, user.id).run();
   await audit(
     env,
     user.id,
     "create",
     "assignment",
     result.meta.last_row_id,
-    `Phân công ${department.name} ngày ${formatFullDate(date)}`
+    `Phân công ${department.name} vào ${position.label} ngày ${formatFullDate(date)}`
   );
   return json({ ok: true }, 201);
 }
@@ -901,21 +1086,37 @@ async function updateAssignmentPerson(request: Request, env: Env, user: User, id
 
 async function moveAssignment(request: Request, env: Env, user: User, id: number): Promise<Response> {
   requireScheduler(user);
-  const body = await readJson<{ date?: string }>(request);
+  const body = await readJson<{ date?: string; positionId?: number }>(request);
   const date = String(body.date || "").slice(0, 10);
   if (!isIsoDate(date)) throw new HttpError(400, "Thiếu ngày làm đích.");
 
   const current = await env.DB.prepare(
-    `SELECT a.id, a.date, a.department_id, d.name AS department_name
-     FROM assignments a JOIN departments d ON d.id = a.department_id WHERE a.id = ?`
-  ).bind(id).first<{ id: number; date: string; department_id: number; department_name: string }>();
+    `SELECT a.id, a.position_id, a.date, a.department_id, d.name AS department_name, p.label AS position_label
+     FROM assignments a
+     JOIN departments d ON d.id = a.department_id
+     JOIN positions p ON p.id = a.position_id
+     WHERE a.id = ?`
+  ).bind(id).first<{
+    id: number;
+    position_id: number;
+    date: string;
+    department_id: number;
+    department_name: string;
+    position_label: string;
+  }>();
   if (!current) throw new HttpError(404, "Không tìm thấy phân công.");
-  if (current.date === date) return json({ ok: true });
 
-  const department = await getDepartmentById(env, current.department_id);
-  const workDays = await listWorkDays(env, date, date);
-  const assignments = await listAssignments(env, date, date);
+  const positionId = Number(body.positionId || current.position_id);
+  if (current.date === date && positionId === current.position_id) return json({ ok: true });
+
+  const [position, department, workDays, assignments] = await Promise.all([
+    getPositionById(env, positionId),
+    getDepartmentById(env, current.department_id),
+    listWorkDays(env, date, date),
+    listAssignments(env, date, date)
+  ]);
   const message = validateAssignmentInput({
+    position,
     department,
     date,
     workDayDates: workDays.map((workDay) => workDay.date),
@@ -925,15 +1126,15 @@ async function moveAssignment(request: Request, env: Env, user: User, id: number
   if (message) throw new HttpError(400, message);
 
   await env.DB.prepare(
-    "UPDATE assignments SET date = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-  ).bind(date, user.id, id).run();
+    "UPDATE assignments SET date = ?, position_id = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+  ).bind(date, positionId, user.id, id).run();
   await audit(
     env,
     user.id,
     "move",
     "assignment",
     id,
-    `Chuyển ${current.department_name} từ ${formatFullDate(current.date)} sang ${formatFullDate(date)}`
+    `Chuyển ${current.department_name}: ${current.position_label} ${formatFullDate(current.date)} sang ${position.label} ${formatFullDate(date)}`
   );
   return json({ ok: true });
 }
@@ -941,9 +1142,12 @@ async function moveAssignment(request: Request, env: Env, user: User, id: number
 async function deleteAssignment(env: Env, user: User, id: number): Promise<Response> {
   requireScheduler(user);
   const current = await env.DB.prepare(
-    `SELECT a.date, d.name AS department_name
-     FROM assignments a JOIN departments d ON d.id = a.department_id WHERE a.id = ?`
-  ).bind(id).first<{ date: string; department_name: string }>();
+    `SELECT a.date, d.name AS department_name, p.label AS position_label
+     FROM assignments a
+     JOIN departments d ON d.id = a.department_id
+     JOIN positions p ON p.id = a.position_id
+     WHERE a.id = ?`
+  ).bind(id).first<{ date: string; department_name: string; position_label: string }>();
   if (!current) throw new HttpError(404, "Không tìm thấy phân công.");
   await env.DB.prepare("DELETE FROM assignments WHERE id = ?").bind(id).run();
   await audit(
@@ -952,7 +1156,7 @@ async function deleteAssignment(env: Env, user: User, id: number): Promise<Respo
     "delete",
     "assignment",
     id,
-    `Xóa phân công ${current.department_name} ngày ${formatFullDate(current.date)}`
+    `Xóa phân công ${current.department_name} ở ${current.position_label} ngày ${formatFullDate(current.date)}`
   );
   return json({ ok: true });
 }
@@ -1291,19 +1495,28 @@ async function rejectSwapEndpoint(env: Env, url: URL, user: User): Promise<Respo
   return json({ ok: true });
 }
 
-async function loadRotation(env: Env): Promise<Rotation | null> {
-  const config = await env.DB.prepare("SELECT start_date, enabled FROM rotation_config WHERE id = 1")
-    .first<{ start_date: string; enabled: number }>();
-  if (!config) return null;
-  const { results } = await env.DB.prepare(
-    `SELECT m.turn_index, m.member_order, m.department_id, d.name AS department_name
-     FROM rotation_members m
-     JOIN departments d ON d.id = m.department_id
-     ORDER BY m.turn_index, m.member_order`
-  ).all<{ turn_index: number; member_order: number; department_id: number; department_name: string }>();
+/** Tua của mọi vị trí khám. Mỗi vị trí có ngày bắt đầu và danh sách tua riêng. */
+async function listRotations(env: Env): Promise<Rotation[]> {
+  const [configs, members] = await Promise.all([
+    env.DB.prepare("SELECT position_id, start_date, enabled FROM rotations")
+      .all<{ position_id: number; start_date: string; enabled: number }>(),
+    env.DB.prepare(
+      `SELECT m.position_id, m.turn_index, m.member_order, m.department_id, d.name AS department_name
+       FROM rotation_members m
+       JOIN departments d ON d.id = m.department_id
+       ORDER BY m.position_id, m.turn_index, m.member_order`
+    ).all<{
+      position_id: number;
+      turn_index: number;
+      member_order: number;
+      department_id: number;
+      department_name: string;
+    }>()
+  ]);
 
-  const turns: RotationMember[][] = [];
-  for (const row of results) {
+  const turnsByPosition = new Map<number, RotationMember[][]>();
+  for (const row of members.results || []) {
+    const turns = turnsByPosition.get(row.position_id) || [];
     while (turns.length <= row.turn_index) turns.push([]);
     turns[row.turn_index].push({
       departmentId: row.department_id,
@@ -1311,12 +1524,25 @@ async function loadRotation(env: Env): Promise<Rotation | null> {
       turnIndex: row.turn_index,
       memberOrder: row.member_order
     });
+    turnsByPosition.set(row.position_id, turns);
   }
-  return { startDate: config.start_date, enabled: !!config.enabled, turns };
+
+  return (configs.results || []).map((config) => ({
+    positionId: config.position_id,
+    startDate: config.start_date,
+    enabled: !!config.enabled,
+    turns: turnsByPosition.get(config.position_id) || []
+  }));
 }
 
-async function saveRotation(request: Request, env: Env, user: User): Promise<Response> {
+async function loadRotation(env: Env, positionId: number): Promise<Rotation | null> {
+  const rotations = await listRotations(env);
+  return rotations.find((rotation) => rotation.positionId === positionId) || null;
+}
+
+async function saveRotation(request: Request, env: Env, user: User, positionId: number): Promise<Response> {
   requireScheduler(user);
+  const position = await getPositionById(env, positionId);
   const body = await readJson<{ startDate?: string; turns?: number[][]; enabled?: boolean }>(request);
   const startDate = String(body.startDate || "").slice(0, 10);
   const turns = body.turns;
@@ -1344,84 +1570,120 @@ async function saveRotation(request: Request, env: Env, user: User): Promise<Res
     throw new HttpError(400, `${departmentsById.get(inactive)!.name} đã ngừng hoạt động, không thể đưa vào tua.`);
   }
 
-  const membersInsert = rotationMembersInsert(turns);
+  const membersInsert = rotationMembersInsert(positionId, turns);
   await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO rotation_config (id, start_date, enabled, updated_by, updated_at)
-       VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(id) DO UPDATE SET start_date = excluded.start_date, enabled = excluded.enabled,
+      `INSERT INTO rotations (position_id, start_date, enabled, updated_by, updated_at)
+       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(position_id) DO UPDATE SET start_date = excluded.start_date, enabled = excluded.enabled,
          updated_by = excluded.updated_by, updated_at = CURRENT_TIMESTAMP`
-    ).bind(startDate, body.enabled === false ? 0 : 1, user.id),
-    env.DB.prepare("DELETE FROM rotation_members"),
+    ).bind(positionId, startDate, body.enabled === false ? 0 : 1, user.id),
+    env.DB.prepare("DELETE FROM rotation_members WHERE position_id = ?").bind(positionId),
     env.DB.prepare(membersInsert.sql).bind(...membersInsert.bindings)
   ]);
-  await audit(env, user.id, "save", "rotation", null, `Lưu tua khám: ${turns.length} tua, bắt đầu ${formatFullDate(startDate)}`);
+  await audit(
+    env,
+    user.id,
+    "save",
+    "rotation",
+    positionId,
+    `Lưu tua ${position.label}: ${turns.length} tua, bắt đầu ${formatFullDate(startDate)}`
+  );
   return json({ ok: true });
 }
 
-async function applyRotation(request: Request, env: Env, user: User): Promise<Response> {
+/**
+ * Áp tua cho một vị trí, hoặc cho mọi vị trí đang bật tua khi positionId là null.
+ * Chỉ thay phân công của đúng những vị trí được áp, giữ lại họ tên và số điện
+ * thoại khoa phòng đã điền.
+ */
+async function applyRotation(
+  request: Request,
+  env: Env,
+  user: User,
+  positionId: number | null
+): Promise<Response> {
   requireScheduler(user);
-  const body = await readJson<{ month?: string; keepPersons?: boolean }>(request);
+  const body = await readJson<{ month?: string }>(request);
   const month = normalizeMonth(body.month);
   const { from, to } = monthRange(month);
 
-  const rotation = await loadRotation(env);
-  if (!rotation || rotation.turns.length === 0) throw new HttpError(400, "Chưa cấu hình tua khám.");
-  if (!rotation.enabled) throw new HttpError(400, "Tua khám đang tắt.");
+  const allRotations = await listRotations(env);
+  const rotations = allRotations.filter(
+    (rotation) =>
+      rotation.enabled &&
+      rotation.turns.some((turn) => turn.length > 0) &&
+      (positionId === null || rotation.positionId === positionId)
+  );
+  if (rotations.length === 0) {
+    throw new HttpError(400, positionId === null ? "Chưa có vị trí nào cấu hình tua." : "Vị trí này chưa cấu hình tua.");
+  }
 
   const workDays = await listWorkDays(env, from, to);
   if (workDays.length === 0) throw new HttpError(400, `Tháng ${month} chưa có ngày làm nào.`);
+  const workDayDates = workDays.map((workDay) => workDay.date);
 
-  // Giữ lại họ tên và số điện thoại khoa phòng đã điền cho từng ngày.
   const existing = await listAssignments(env, from, to);
   const persons = new Map(
     existing
       .filter((assignment) => assignment.personName.trim())
-      .map((assignment) => [`${assignment.date}:${assignment.departmentId}`, assignment])
+      .map((assignment) => [
+        `${assignment.positionId}:${assignment.date}:${assignment.departmentId}`,
+        assignment
+      ])
   );
 
-  const planned = rotationAssignmentsForWorkDays(
-    workDays.map((workDay) => workDay.date),
-    rotation.turns,
-    rotation.startDate
-  );
-  if (planned.length === 0) {
+  const positions = await listPositions(env);
+  const statements: PostgresPreparedStatement[] = [];
+  let created = 0;
+  let restored = 0;
+
+  for (const rotation of rotations) {
+    const planned = rotationAssignmentsForWorkDays(workDayDates, rotation.turns, rotation.startDate);
+    if (planned.length === 0) continue;
+    statements.push(
+      env.DB.prepare("DELETE FROM assignments WHERE position_id = ? AND date BETWEEN ? AND ?")
+        .bind(rotation.positionId, from, to)
+    );
+    for (const item of planned) {
+      const previous = persons.get(`${rotation.positionId}:${item.date}:${item.departmentId}`);
+      if (previous) restored += 1;
+      created += 1;
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO assignments (position_id, date, department_id, person_name, person_phone, member_order, created_by, updated_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          rotation.positionId,
+          item.date,
+          item.departmentId,
+          previous?.personName || "",
+          previous?.personPhone || "",
+          item.memberOrder,
+          user.id,
+          user.id
+        )
+      );
+    }
+  }
+
+  if (statements.length === 0) {
     throw new HttpError(400, `Không có ngày làm nào trong tháng ${month} tính từ ngày bắt đầu tua.`);
   }
 
-  const statements: PostgresPreparedStatement[] = [
-    env.DB.prepare("DELETE FROM assignments WHERE date BETWEEN ? AND ?").bind(from, to)
-  ];
-  let restored = 0;
-  for (const item of planned) {
-    const previous = persons.get(`${item.date}:${item.departmentId}`);
-    if (previous) restored += 1;
-    statements.push(
-      env.DB.prepare(
-        `INSERT INTO assignments (date, department_id, person_name, person_phone, member_order, created_by, updated_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
-      ).bind(
-        item.date,
-        item.departmentId,
-        previous?.personName || "",
-        previous?.personPhone || "",
-        item.memberOrder,
-        user.id,
-        user.id
-      )
-    );
-  }
-
   await env.DB.batch(statements);
+  const scope = positionId === null
+    ? `${rotations.length} vị trí`
+    : positions.find((position) => position.id === positionId)?.label || "vị trí";
   await audit(
     env,
     user.id,
     "apply",
     "rotation",
-    null,
-    `Áp dụng tua cho tháng ${month}: ${planned.length} phân công, giữ lại ${restored} người đã điền`
+    positionId,
+    `Áp tua ${scope} cho tháng ${month}: ${created} phân công, giữ lại ${restored} người đã điền`
   );
-  return json({ ok: true, created: planned.length, restored });
+  return json({ ok: true, created, restored });
 }
 
 async function getAudit(env: Env, url: URL, user: User): Promise<Response> {
@@ -1575,13 +1837,16 @@ async function getReportEndpoint(env: Env, url: URL, user: User): Promise<Respon
 
 async function listAttendance(env: Env, date: string): Promise<AttendanceEntry[]> {
   const { results } = await env.DB.prepare(
-    `SELECT a.department_id, d.name AS department_name, a.person_name, a.person_phone,
+    `SELECT a.id AS assignment_id, a.position_id, p.label AS position_label,
+            a.department_id, d.name AS department_name, a.person_name, a.person_phone,
             att.present, att.note, att.signature, att.signature_name, att.signature_at
      FROM assignments a
      JOIN departments d ON d.id = a.department_id
-     LEFT JOIN work_report_attendance att ON att.date = a.date AND att.department_id = a.department_id
+     JOIN positions p ON p.id = a.position_id
+     JOIN sections sec ON sec.id = p.section_id
+     LEFT JOIN work_report_attendance att ON att.assignment_id = a.id
      WHERE a.date = ?
-     ORDER BY a.member_order, d.sort_order, d.name`
+     ORDER BY sec.sort_order, sec.id, p.sort_order, p.id, a.member_order, d.name`
   ).bind(date).all<AttendanceRow>();
   return results.map(mapAttendanceRow);
 }
@@ -1594,7 +1859,7 @@ async function listReportsEndpoint(env: Env): Promise<Response> {
      FROM work_days w
      LEFT JOIN work_reports r ON r.date = w.date
      LEFT JOIN assignments a ON a.date = w.date
-     LEFT JOIN work_report_attendance att ON att.date = w.date AND att.department_id = a.department_id
+     LEFT JOIN work_report_attendance att ON att.assignment_id = a.id
      GROUP BY w.date, w.session, r.report_time
      ORDER BY w.date DESC
      LIMIT 120`
@@ -1660,29 +1925,35 @@ async function saveReportEndpoint(request: Request, env: Env, user: User): Promi
 
 async function saveAttendanceEndpoint(request: Request, env: Env, user: User): Promise<Response> {
   const body = await readJson<{
-    date?: string;
-    departmentId?: number;
+    assignmentId?: number;
     present?: boolean;
     note?: string;
     signature?: string;
     signerName?: string;
     useStoredSignature?: boolean;
   }>(request);
-  const date = String(body.date || "").trim();
-  if (!isIsoDate(date)) throw new HttpError(400, "Ngày làm việc không hợp lệ.");
-
-  const departmentId = canManageSchedule(user.role) ? Number(body.departmentId || 0) : Number(user.departmentId || 0);
-  if (!departmentId) throw new HttpError(400, "Thiếu khoa phòng điểm danh.");
-  if (!canManageSchedule(user.role) && user.departmentId !== departmentId) {
-    throw new HttpError(403, "Chỉ khoa phòng của mình mới được điểm danh và ký tên.");
-  }
+  const assignmentId = Number(body.assignmentId || 0);
+  if (!assignmentId) throw new HttpError(400, "Thiếu ô phân công cần điểm danh.");
 
   const assignment = await env.DB.prepare(
-    `SELECT a.id, d.name AS department_name
-     FROM assignments a JOIN departments d ON d.id = a.department_id
-     WHERE a.date = ? AND a.department_id = ?`
-  ).bind(date, departmentId).first<{ id: number; department_name: string }>();
-  if (!assignment) throw new HttpError(404, "Khoa phòng này không được phân công ngày đã chọn.");
+    `SELECT a.id, a.date, a.department_id, d.name AS department_name, p.label AS position_label
+     FROM assignments a
+     JOIN departments d ON d.id = a.department_id
+     JOIN positions p ON p.id = a.position_id
+     WHERE a.id = ?`
+  ).bind(assignmentId).first<{
+    id: number;
+    date: string;
+    department_id: number;
+    department_name: string;
+    position_label: string;
+  }>();
+  if (!assignment) throw new HttpError(404, "Không tìm thấy ô phân công.");
+
+  const date = assignment.date;
+  if (!canManageSchedule(user.role) && user.departmentId !== assignment.department_id) {
+    throw new HttpError(403, "Chỉ khoa phòng của mình mới được điểm danh và ký tên.");
+  }
 
   const reportExists = await env.DB.prepare("SELECT date FROM work_reports WHERE date = ?").bind(date).first();
   if (!reportExists) throw new HttpError(409, "Điều phối cần tạo báo cáo làm việc của ngày này trước.");
@@ -1707,35 +1978,35 @@ async function saveAttendanceEndpoint(request: Request, env: Env, user: User): P
   if (wantsSignature) {
     await env.DB.prepare(
       `INSERT INTO work_report_attendance
-         (date, department_id, present, note, signature, signature_name, signature_at, signature_user_id, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(date, department_id) DO UPDATE SET
+         (assignment_id, present, note, signature, signature_name, signature_at, signature_user_id, updated_at)
+       VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(assignment_id) DO UPDATE SET
          present = excluded.present, note = excluded.note, signature = excluded.signature,
          signature_name = excluded.signature_name, signature_at = CURRENT_TIMESTAMP,
          signature_user_id = excluded.signature_user_id, updated_at = CURRENT_TIMESTAMP`
-    ).bind(date, departmentId, present ? 1 : 0, note, signature, signerName, user.id).run();
+    ).bind(assignmentId, present ? 1 : 0, note, signature, signerName, user.id).run();
     await audit(
       env,
       user.id,
       "sign",
       "work_report",
-      null,
-      `${assignment.department_name} ký báo cáo làm việc ngày ${formatFullDate(date)}: ${signerName}`
+      assignmentId,
+      `${assignment.department_name} (${assignment.position_label}) ký báo cáo ngày ${formatFullDate(date)}: ${signerName}`
     );
   } else {
     await env.DB.prepare(
-      `INSERT INTO work_report_attendance (date, department_id, present, note, updated_at)
-       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(date, department_id) DO UPDATE SET
+      `INSERT INTO work_report_attendance (assignment_id, present, note, updated_at)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(assignment_id) DO UPDATE SET
          present = excluded.present, note = excluded.note, updated_at = CURRENT_TIMESTAMP`
-    ).bind(date, departmentId, present ? 1 : 0, note).run();
+    ).bind(assignmentId, present ? 1 : 0, note).run();
     await audit(
       env,
       user.id,
       "attendance",
       "work_report",
-      null,
-      `Điểm danh ${assignment.department_name} ngày ${formatFullDate(date)}: ${present ? "có mặt" : "vắng"}`
+      assignmentId,
+      `Điểm danh ${assignment.department_name} (${assignment.position_label}) ngày ${formatFullDate(date)}: ${present ? "có mặt" : "vắng"}`
     );
   }
 
@@ -1755,11 +2026,7 @@ async function signReportEndpoint(request: Request, env: Env, user: User): Promi
     throw new HttpError(400, "Ngày làm việc hoặc vai trò ký không hợp lệ.");
   }
   if (body.role === "khoa_phong") {
-    return saveAttendanceEndpoint(
-      new Request(request.url, { method: "POST", body: JSON.stringify({ ...body, present: true }) }),
-      env,
-      user
-    );
+    throw new HttpError(400, "Khoa phòng ký tên qua mục điểm danh của báo cáo.");
   }
   requireScheduler(user);
 
@@ -1889,6 +2156,20 @@ interface DepartmentRow {
   sort_order: number;
 }
 
+interface SectionRow {
+  id: number;
+  label: string;
+  sort_order: number;
+}
+
+interface PositionRow {
+  id: number;
+  section_id: number;
+  label: string;
+  sort_order: number;
+  active: number;
+}
+
 interface WorkDayRow {
   date: string;
   session: DaySession;
@@ -1897,11 +2178,13 @@ interface WorkDayRow {
 
 interface AssignmentRow {
   id: number;
+  position_id: number;
   date: string;
   department_id: number;
   department_name: string;
   person_name: string;
   person_phone: string;
+  member_order: number;
   updated_at: string | null;
 }
 
@@ -1914,6 +2197,9 @@ interface CoordinatorAssignmentRow {
 }
 
 interface AttendanceRow {
+  assignment_id: number;
+  position_id: number;
+  position_label: string;
   department_id: number;
   department_name: string;
   person_name: string;
@@ -1956,6 +2242,20 @@ function mapDepartmentRow(row: DepartmentRow): Department {
   };
 }
 
+function mapSectionRow(row: SectionRow): Section {
+  return { id: row.id, label: row.label, sortOrder: row.sort_order };
+}
+
+function mapPositionRow(row: PositionRow): Position {
+  return {
+    id: row.id,
+    sectionId: row.section_id,
+    label: row.label,
+    sortOrder: row.sort_order,
+    active: !!row.active
+  };
+}
+
 function mapWorkDayRow(row: WorkDayRow): WorkDay {
   return {
     date: row.date,
@@ -1967,11 +2267,13 @@ function mapWorkDayRow(row: WorkDayRow): WorkDay {
 function mapAssignmentRow(row: AssignmentRow): Assignment {
   return {
     id: row.id,
+    positionId: row.position_id,
     date: row.date,
     departmentId: row.department_id,
     departmentName: row.department_name,
     personName: row.person_name || "",
     personPhone: row.person_phone || "",
+    memberOrder: row.member_order,
     updatedAt: row.updated_at
   };
 }
@@ -1988,6 +2290,9 @@ function mapCoordinatorAssignmentRow(row: CoordinatorAssignmentRow): Coordinator
 
 function mapAttendanceRow(row: AttendanceRow): AttendanceEntry {
   return {
+    assignmentId: row.assignment_id,
+    positionId: row.position_id,
+    positionLabel: row.position_label,
     departmentId: row.department_id,
     departmentName: row.department_name,
     personName: row.person_name || "",

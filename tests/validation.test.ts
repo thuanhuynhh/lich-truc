@@ -14,18 +14,21 @@ import {
   validateCoordinatorSwap,
   validatePersonInput
 } from "../src/shared/validation";
-import type { Assignment, Department } from "../src/shared/types";
+import type { Assignment, Department, Position } from "../src/shared/types";
 
 const department: Department = { id: 1, name: "Khoa Nội", active: true, sortOrder: 10 };
+const position: Position = { id: 5, sectionId: 1, label: "Khám nội", sortOrder: 10, active: true };
 
 function assignment(overrides: Partial<Assignment> = {}): Assignment {
   return {
     id: 1,
+    positionId: 5,
     date: "2026-09-05",
     departmentId: 1,
     departmentName: "Khoa Nội",
     personName: "Nguyễn Văn A",
     personPhone: "0901234567",
+    memberOrder: 0,
     ...overrides
   };
 }
@@ -90,6 +93,7 @@ describe("phân công khoa phòng", () => {
   it("chỉ phân công vào ngày đã mở làm việc", () => {
     expect(
       validateAssignmentInput({
+        position,
         department,
         date: "2026-09-06",
         workDayDates: ["2026-09-05"],
@@ -101,6 +105,7 @@ describe("phân công khoa phòng", () => {
   it("không phân công khoa phòng đã tắt", () => {
     expect(
       validateAssignmentInput({
+        position,
         department: { ...department, active: false },
         date: "2026-09-05",
         workDayDates: ["2026-09-05"],
@@ -109,20 +114,46 @@ describe("phân công khoa phòng", () => {
     ).toBe("Khoa phòng này đã ngừng hoạt động.");
   });
 
-  it("chặn trùng khoa phòng trong cùng một ngày", () => {
+  it("không chặn khi cùng khoa phòng đứng vị trí khác", () => {
     expect(
       validateAssignmentInput({
+        position: { ...position, id: 6, label: "Khám ngoại" },
         department,
         date: "2026-09-05",
         workDayDates: ["2026-09-05"],
         assignments: [assignment()]
       })
-    ).toBe("Khoa Nội đã có trong ngày 2026-09-05.");
+    ).toBeNull();
+  });
+
+  it("chặn vị trí đã ngừng hoạt động", () => {
+    expect(
+      validateAssignmentInput({
+        position: { ...position, active: false },
+        department,
+        date: "2026-09-05",
+        workDayDates: ["2026-09-05"],
+        assignments: []
+      })
+    ).toBe("Vị trí Khám nội đã ngừng hoạt động.");
+  });
+
+  it("chặn trùng khoa phòng ở cùng vị trí trong cùng một ngày", () => {
+    expect(
+      validateAssignmentInput({
+        position,
+        department,
+        date: "2026-09-05",
+        workDayDates: ["2026-09-05"],
+        assignments: [assignment()]
+      })
+    ).toBe("Khoa Nội đã có ở vị trí Khám nội ngày 2026-09-05.");
   });
 
   it("bỏ qua chính phân công đang được chuyển", () => {
     expect(
       validateAssignmentInput({
+        position,
         department,
         date: "2026-09-05",
         workDayDates: ["2026-09-05"],

@@ -162,7 +162,7 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
   };
 
   const handleAttendance = async (payload: {
-    departmentId: number;
+    assignmentId: number;
     present?: boolean;
     note?: string;
     signature?: string;
@@ -170,7 +170,7 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
     useStoredSignature?: boolean;
   }) => {
     try {
-      await api.saveAttendance({ date: selectedDate, ...payload });
+      await api.saveAttendance(payload);
       notify(payload.signature || payload.useStoredSignature ? "Đã ký tên báo cáo làm việc." : "Đã cập nhật điểm danh.");
       await refreshCurrent();
     } catch (error) {
@@ -506,6 +506,7 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
                 ) : (
                   <div className="attendance-table" role="table">
                     <div className="attendance-head" role="row">
+                      <span role="columnheader">Vị trí khám</span>
                       <span role="columnheader">Khoa phòng</span>
                       <span role="columnheader">Người làm việc</span>
                       <span role="columnheader">Điện thoại</span>
@@ -516,8 +517,9 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
                       const isMine = entry.departmentId === user.departmentId;
                       const canMarkPresent = isScheduler || (isMine && canSign);
                       return (
-                        <div className="attendance-row" role="row" key={entry.departmentId}>
-                          <strong>{entry.departmentName}</strong>
+                        <div className="attendance-row" role="row" key={entry.assignmentId}>
+                          <strong>{entry.positionLabel}</strong>
+                          <span>{entry.departmentName}</span>
                           <span>{entry.personName || "Chưa điền tên"}</span>
                           <span>{entry.personPhone || "—"}</span>
                           <span className="attendance-present">
@@ -528,7 +530,7 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
                                 aria-label={`Điểm danh ${entry.departmentName}`}
                                 onChange={(event) =>
                                   void handleAttendance({
-                                    departmentId: entry.departmentId,
+                                    assignmentId: entry.assignmentId,
                                     present: event.target.checked
                                   })
                                 }
@@ -542,7 +544,10 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
                           <div className="attendance-signature">
                             {entry.signature ? (
                               <div className="saved-signature-display">
-                                <img src={entry.signature} alt={`Chữ ký ${entry.departmentName}`} />
+                                <img
+                                  src={entry.signature}
+                                  alt={`Chữ ký ${entry.departmentName} tại ${entry.positionLabel}`}
+                                />
                                 <div className="signature-signer-name">{entry.signatureName}</div>
                                 <div className="signature-time no-print">
                                   Đã ký: {formatVietnamDateTime(entry.signatureAt)}
@@ -550,12 +555,12 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
                               </div>
                             ) : isMine && canSign && currentReport ? (
                               <SignaturePad
-                                label={`Ký tên ${entry.departmentName}`}
+                                label={`Ký tên ${entry.departmentName} · ${entry.positionLabel}`}
                                 defaultName={user.fullName || entry.personName || ""}
                                 storedSignature={user.signature}
                                 onQuickSave={(name) =>
                                   void handleAttendance({
-                                    departmentId: entry.departmentId,
+                                    assignmentId: entry.assignmentId,
                                     present: true,
                                     signerName: name,
                                     useStoredSignature: true
@@ -563,7 +568,7 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
                                 }
                                 onSave={(sig, name) =>
                                   void handleAttendance({
-                                    departmentId: entry.departmentId,
+                                    assignmentId: entry.assignmentId,
                                     present: true,
                                     signerName: name,
                                     signature: sig

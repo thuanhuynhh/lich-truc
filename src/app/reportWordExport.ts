@@ -125,11 +125,12 @@ function attendanceTable(attendance: AttendanceEntry[]): Table {
   const headerRow = new TableRow({
     tableHeader: true,
     children: [
-      textCell("Khoa phòng", 26, { bold: true, center: true }),
-      textCell("Người làm việc", 24, { bold: true, center: true }),
-      textCell("Điện thoại", 16, { bold: true, center: true }),
-      textCell("Có mặt", 10, { bold: true, center: true }),
-      textCell("Chữ ký", 24, { bold: true, center: true })
+      textCell("Vị trí khám", 20, { bold: true, center: true }),
+      textCell("Khoa phòng", 20, { bold: true, center: true }),
+      textCell("Người làm việc", 20, { bold: true, center: true }),
+      textCell("Điện thoại", 14, { bold: true, center: true }),
+      textCell("Có mặt", 8, { bold: true, center: true }),
+      textCell("Chữ ký", 18, { bold: true, center: true })
     ]
   });
 
@@ -138,12 +139,13 @@ function attendanceTable(attendance: AttendanceEntry[]): Table {
     return new TableRow({
       cantSplit: true,
       children: [
-        textCell(entry.departmentName, 26),
-        textCell(valueOrFallback(entry.personName, "Chưa điền"), 24),
-        textCell(valueOrFallback(entry.personPhone, "—"), 16),
-        textCell(entry.present ? "x" : "", 10, { center: true }),
+        textCell(entry.positionLabel, 20),
+        textCell(entry.departmentName, 20),
+        textCell(valueOrFallback(entry.personName, "Chưa điền"), 20),
+        textCell(valueOrFallback(entry.personPhone, "—"), 14),
+        textCell(entry.present ? "x" : "", 8, { center: true }),
         new TableCell({
-          width: { size: 24, type: WidthType.PERCENTAGE },
+          width: { size: 18, type: WidthType.PERCENTAGE },
           verticalAlign: VerticalAlign.CENTER,
           children: image
             ? [
@@ -245,6 +247,7 @@ export function createWorkReportDocument(report: WorkReport): Document {
   });
 
   const presentCount = report.attendance.filter((entry) => entry.present).length;
+  const departmentCount = new Set(report.attendance.map((entry) => entry.departmentId)).size;
 
   return new Document({
     creator: "Hệ thống Lịch khám sức khỏe toàn dân",
@@ -282,7 +285,10 @@ export function createWorkReportDocument(report: WorkReport): Document {
           sectionHeading("I. Điểm danh nhân sự tham gia:"),
           attendanceTable(report.attendance),
           paragraph([
-            run(`Tổng số khoa phòng tham gia: ${report.attendance.length}. Có mặt: ${presentCount}.`, { italics: true })
+            run(
+              `Tổng số vị trí khám: ${report.attendance.length}. Số khoa phòng tham gia: ${departmentCount}. Có mặt: ${presentCount}.`,
+              { italics: true }
+            )
           ], { before: 60 }),
 
           sectionHeading("II. Số liệu công việc:"),

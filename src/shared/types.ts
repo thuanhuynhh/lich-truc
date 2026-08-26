@@ -20,6 +20,22 @@ export interface Department {
   sortOrder: number;
 }
 
+/** Mục của bảng lịch, ví dụ "I. KHÁM LÂM SÀNG". */
+export interface Section {
+  id: number;
+  label: string;
+  sortOrder: number;
+}
+
+/** Vị trí khám: một hàng của bảng lịch, có cấu hình tua riêng. */
+export interface Position {
+  id: number;
+  sectionId: number;
+  label: string;
+  sortOrder: number;
+  active: boolean;
+}
+
 export interface WorkDay {
   date: string;
   session: DaySession;
@@ -28,11 +44,13 @@ export interface WorkDay {
 
 export interface Assignment {
   id: number;
+  positionId: number;
   date: string;
   departmentId: number;
   departmentName: string;
   personName: string;
   personPhone: string;
+  memberOrder: number;
   updatedAt?: string | null;
 }
 
@@ -85,6 +103,7 @@ export interface RotationMember {
 }
 
 export interface Rotation {
+  positionId: number;
   startDate: string;
   enabled: boolean;
   turns: RotationMember[][];
@@ -93,11 +112,13 @@ export interface Rotation {
 export interface ScheduleResponse {
   month: string;
   workDays: WorkDay[];
+  sections: Section[];
+  positions: Position[];
   departments: Department[];
   assignments: Assignment[];
   coordinators: User[];
   coordinatorAssignments: CoordinatorAssignment[];
-  rotation: Rotation | null;
+  rotations: Rotation[];
   auditLogs: AuditLog[];
   lockPersonOnWorkDay?: boolean;
 }
@@ -117,6 +138,9 @@ export interface SystemSettings {
 export interface SettingsResponse extends SystemSettings {}
 
 export interface AttendanceEntry {
+  assignmentId: number;
+  positionId: number;
+  positionLabel: string;
   departmentId: number;
   departmentName: string;
   personName: string;

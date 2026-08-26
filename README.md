@@ -7,8 +7,8 @@ Repository: <https://github.com/thuanhuynhh/lich-truc> (branch `lich-ksktd`)
 ## Mô hình nghiệp vụ
 
 - **Ngày làm việc**: lịch không chạy liên tục T2–CN. Quản lý hoặc điều phối mở từng ngày khám và chọn buổi làm: **Sáng**, **Chiều** hoặc **Cả buổi**. Chỉ những ngày đã mở mới thành cột trong bảng lịch.
-- **Bảng lịch**: hàng đầu là **hàng điều phối** (ai phụ trách buổi khám hôm đó), các hàng tiếp theo là **khoa phòng**. Mỗi ô khoa phòng chứa họ tên và số điện thoại người đi làm.
-- **Tua khám**: quản lý/điều phối cấu hình các tua khoa phòng; tua xoay theo thứ tự **ngày làm việc**, không theo ngày dương lịch. Áp tua cho cả tháng vẫn giữ lại họ tên và số điện thoại khoa phòng đã điền.
+- **Bảng lịch**: hàng đầu là **hàng điều phối** (ai phụ trách buổi khám hôm đó). Các hàng tiếp theo là **vị trí khám** (ví dụ Khám nội, Khám ngoại), gom theo **mục** do quản lý tự thêm trong trang Cấu hình. Mỗi ô chứa một hoặc nhiều khoa phòng, kèm họ tên và số điện thoại người đi làm.
+- **Tua khám**: mỗi vị trí khám có cấu hình tua riêng, mở từ nút "Tua" ngay trên hàng của vị trí đó. Một tua có thể gồm nhiều khoa phòng cùng đứng vị trí đó trong ngày. Tua xoay theo thứ tự **ngày làm việc**, không theo ngày dương lịch. Áp tua vẫn giữ lại họ tên và số điện thoại khoa phòng đã điền.
 - **Đổi ngày làm của điều phối**: điều phối xin đổi ngày làm với một điều phối khác; yêu cầu chỉ có hiệu lực khi người kia đồng ý (qua thông báo trong app hoặc link xác nhận). Quản lý xếp lịch trực tiếp, không cần duyệt.
 - **Báo cáo làm việc**: mỗi ngày làm có một báo cáo. Điều phối phụ trách nhập số liệu buổi khám; từng khoa phòng điểm danh và ký tên; điều phối ký chốt. Sau khi ký chốt chỉ quản lý còn sửa được số liệu.
 
@@ -16,8 +16,8 @@ Repository: <https://github.com/thuanhuynhh/lich-truc> (branch `lich-ksktd`)
 
 | Vai trò | Quyền |
 | --- | --- |
-| `admin` (Quản lý) | Toàn quyền: khoa phòng, tài khoản, cấu hình, ngày làm, phân công, hàng điều phối, tua, báo cáo |
-| `dieu_phoi` (Điều phối) | Mở/sửa ngày làm, phân công khoa phòng, chạy tua, nhập và ký chốt báo cáo ngày mình phụ trách, xin đổi ngày làm. Không quản lý tài khoản, khoa phòng hay cấu hình |
+| `admin` (Quản lý) | Toàn quyền: mục và vị trí khám, khoa phòng, tài khoản, cấu hình, ngày làm, phân công, hàng điều phối, tua, báo cáo |
+| `dieu_phoi` (Điều phối) | Mở/sửa ngày làm, phân công khoa phòng vào vị trí, cấu hình và áp tua, nhập và ký chốt báo cáo ngày mình phụ trách, xin đổi ngày làm. Không thêm/sửa mục, vị trí khám, khoa phòng, tài khoản hay cấu hình |
 | `khoa_phong` (Khoa phòng) | Xem lịch; điền và sửa họ tên + số điện thoại người đi làm của khoa phòng mình; điểm danh và ký tên trong báo cáo làm việc |
 
 Khoa phòng sửa được người đi làm khi ngày làm **chưa qua**. Cấu hình `lock_person_on_workday` cho phép siết lại: phải điền xong **trước** ngày khám.
@@ -67,7 +67,10 @@ psql "$DATABASE_URL" -f postgres/schema.sql
 DATABASE_URL="$DATABASE_URL" npm run db:create-admin -- admin 'MatKhauManh' 'Nguyễn Văn A'
 ```
 
-Sau đó đăng nhập bằng tài khoản quản lý vừa tạo để thêm khoa phòng, tài khoản điều phối và tài khoản khoa phòng.
+Sau đó đăng nhập bằng tài khoản quản lý vừa tạo để thêm mục và vị trí khám (trang Cấu hình), khoa phòng, rồi tài khoản điều phối và khoa phòng.
+
+> Hyperdrive mặc định bật cache truy vấn 60 giây. Ứng dụng đọc lại dữ liệu ngay sau khi ghi nên phải tắt cache:
+> `npx wrangler hyperdrive update <id> --caching-disabled`.
 
 Tạo Hyperdrive trỏ tới database này, không ghi password vào Git:
 

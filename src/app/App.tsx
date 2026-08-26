@@ -17,7 +17,7 @@ import {
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { ScheduleView } from "./ScheduleView";
-import { RotationDialog, WorkDaysView } from "./ScheduleTools";
+import { PositionsManager, RotationDialog, WorkDaysView } from "./ScheduleTools";
 import { DepartmentsView, HistoryView, ProfileView, SettingsView, UsersView } from "./AdminViews";
 import { ReportView } from "./ReportView";
 import { APP_TITLE, exportExcel, exportPng } from "./scheduleExport";
@@ -25,7 +25,9 @@ import type {
   Assignment,
   CoordinatorAssignment,
   NotificationItem,
+  Position,
   ScheduleResponse,
+  Section,
   SwapRequest,
   User,
   WorkDay
@@ -51,7 +53,7 @@ export default function App() {
   const [view, setView] = useState<View>("schedule");
   const [toast, setToast] = useState("");
   const [showLunar, setShowLunar] = useState(false);
-  const [rotationOpen, setRotationOpen] = useState(false);
+  const [rotationPosition, setRotationPosition] = useState<Position | null>(null);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notificationsLoading, setNotificationsLoading] = useState(false);
@@ -144,7 +146,7 @@ export default function App() {
     refreshSequence.current += 1;
     setData(null);
     setView("schedule");
-    setRotationOpen(false);
+    setRotationPosition(null);
     setNotifications([]);
     setNotificationsOpen(false);
     setReportNavigation(null);
@@ -193,6 +195,12 @@ export default function App() {
       <header className="app-header">
         <div className="header-top">
           <div className="brand">
+            <img
+              className="brand-mark"
+              src="/favicon.png"
+              alt="Logo Bệnh viện Thống Nhất"
+              style={{ objectFit: "contain", background: "transparent" }}
+            />
             <div>
               <h1>{APP_TITLE}</h1>
               <p>{user.departmentName ? `${roleLabel(user.role)} · ${user.departmentName}` : roleLabel(user.role)}</p>
@@ -330,8 +338,20 @@ export default function App() {
               <RefreshCw size={16} />
             </button>
             {canSchedule && (
-              <button type="button" className="tool-btn" onClick={() => setRotationOpen(true)}>
-                <ListOrdered size={16} /> <span className="btn-text">Tua khám</span>
+              <button
+                type="button"
+                className="tool-btn"
+                title="Áp tua của mọi vị trí cho tháng đang xem"
+                onClick={() => {
+                  if (!window.confirm(`Áp tua của mọi vị trí cho ${formatMonthLabel(month).toLowerCase()}?`)) return;
+                  void run(async () => {
+                    const result = await api.applyRotation(null, { month });
+                    await refresh();
+                    notify(`Đã áp tua: ${result.created} phân công, giữ lại ${result.restored} người đã điền`);
+                  });
+                }}
+              >
+                <ListOrdered size={16} /> <span className="btn-text">Áp tua tất cả</span>
               </button>
             )}
             {canSchedule && (
@@ -405,16 +425,19 @@ export default function App() {
               data={data}
               user={user}
               showLunar={showLunar}
-              lockPersonOnWorkDay={!!data.lockPersonOnWorkDay}
               tableRef={tableRef}
-              onAddAssignment={(date, departmentId) =>
+              onAddAssignment={(positionId, date, departmentId) =>
                 void run(async () => {
-                  await api.putAssignment({ date, departmentId });
+                  await api.putAssignment({ positionId, date, departmentId });
                   await refresh();
                 }, "Đã thêm phân công")
               }
-              onDeleteAssignment={(assignment: Assignment) => {
-                if (!window.confirm(`Xóa phân công ${assignment.departmentName} ngày ${formatFullDate(assignment.date)}?`)) {
+              onDeleteAssignment={(assignment: Assignment, position: Position) => {
+                if (
+                  !window.confirm(
+                    `Xóa phân công ${assignment.departmentName} ở ${position.label} ngày ${formatFullDate(assignment.date)}?`
+                  )
+                ) {
                   return;
                 }
                 void run(async () => {
@@ -422,12 +445,21 @@ export default function App() {
                   await refresh();
                 }, "Đã xóa phân công");
               }}
-              onMoveAssignment={(assignmentId, date) =>
+              onMoveAssignment={(assignmentId, positionId, date) =>
                 void run(async () => {
-                  await api.moveAssignment(assignmentId, { date });
+                  await api.moveAssignment(assignmentId, { positionId, date });
                   await refresh();
                 }, "Đã chuyển phân công")
               }
+              onOpenRotation={setRotationPosition}
+              onApplyRotation={(position) => {
+                if (!window.confirm(`Áp tua của ${position.label} cho ${formatMonthLabel(month).toLowerCase()}?`)) return;
+                void run(async () => {
+                  const result = await api.applyRotation(position.id, { month });
+                  await refresh();
+                  notify(`Đã áp tua ${position.label}: ${result.created} phân công, giữ lại ${result.restored} người đã điền`);
+                });
+              }}
               onSavePerson={(assignment, personName, personPhone) =>
                 run(async () => {
                   await api.updateAssignmentPerson(assignment.id, { personName, personPhone });
@@ -547,7 +579,63 @@ export default function App() {
         <HistoryView data={data} month={month} isAdmin={isAdmin} notify={notify} />
       )}
 
-      {view === "settings" && isAdmin && <SettingsView notify={notify} />}
+      {view === "settings" && isAdmin && (
+        <SettingsView
+          notify={notify}
+          positionsManager={
+            data && (
+              <PositionsManager
+                sections={data.sections}
+                positions={data.positions}
+                onCreateSection={(label) =>
+                  run(async () => {
+                    await api.createSection({ label });
+                    await refresh();
+                  }, "Đã thêm mục")
+                }
+                onUpdateSection={(id, payload) =>
+                  void run(async () => {
+                    await api.updateSection(id, payload);
+                    await refresh();
+                  })
+                }
+                onDeleteSection={(section: Section) => {
+                  if (!window.confirm(`Xóa mục ${section.label}? Mọi vị trí khám trong mục sẽ bị xóa theo.`)) return;
+                  void run(async () => {
+                    await api.deleteSection(section.id);
+                    await refresh();
+                  }, "Đã xóa mục");
+                }}
+                onCreatePosition={(sectionId, label) =>
+                  run(async () => {
+                    await api.createPosition({ sectionId, label });
+                    await refresh();
+                  }, "Đã thêm vị trí khám")
+                }
+                onUpdatePosition={(id, payload) =>
+                  void run(async () => {
+                    await api.updatePosition(id, payload);
+                    await refresh();
+                  })
+                }
+                onDeletePosition={(position: Position) => {
+                  if (
+                    !window.confirm(
+                      `Xóa vị trí ${position.label}? Toàn bộ phân công và tua của vị trí này sẽ bị xóa theo.`
+                    )
+                  ) {
+                    return;
+                  }
+                  void run(async () => {
+                    await api.deletePosition(position.id);
+                    await refresh();
+                  }, "Đã xóa vị trí khám");
+                }}
+              />
+            )
+          }
+        />
+      )}
 
       {view === "profile" && (
         <ProfileView
@@ -560,26 +648,27 @@ export default function App() {
         />
       )}
 
-      {rotationOpen && data && (
+      {rotationPosition && data && (
         <RotationDialog
           month={month}
+          position={rotationPosition}
           departments={data.departments}
-          rotation={data.rotation}
+          rotation={data.rotations.find((item) => item.positionId === rotationPosition.id) || null}
           workDayCount={data.workDays.length}
-          onClose={() => setRotationOpen(false)}
+          onClose={() => setRotationPosition(null)}
           onSave={(payload) =>
             void run(async () => {
-              await api.saveRotation(payload);
+              await api.saveRotation(rotationPosition.id, payload);
               await refresh();
-            }, "Đã lưu tua khám")
+            }, `Đã lưu tua ${rotationPosition.label}`)
           }
           onApply={(payload) =>
             void run(async () => {
-              await api.saveRotation(payload);
-              const result = await api.applyRotation({ month });
+              await api.saveRotation(rotationPosition.id, payload);
+              const result = await api.applyRotation(rotationPosition.id, { month });
               await refresh();
-              setRotationOpen(false);
-              notify(`Đã áp tua: ${result.created} phân công, giữ lại ${result.restored} người đã điền`);
+              setRotationPosition(null);
+              notify(`Đã áp tua ${rotationPosition.label}: ${result.created} phân công, giữ lại ${result.restored} người đã điền`);
             })
           }
         />
@@ -643,7 +732,7 @@ function Tab({
   icon?: React.ReactNode;
 }) {
   return (
-    <button type="button" className={`tab ${view === id ? "active" : ""}`} onClick={() => setView(id)}>
+    <button type="button" className={view === id ? "active" : ""} onClick={() => setView(id)}>
       {icon}
       {label}
     </button>
@@ -662,7 +751,7 @@ function LoginScreen({
   const [submitting, setSubmitting] = useState(false);
 
   return (
-    <div className="login-shell">
+    <main className="login-page">
       <form
         className="login-card"
         onSubmit={async (event: FormEvent) => {
@@ -672,14 +761,26 @@ function LoginScreen({
           setSubmitting(false);
         }}
       >
+        <img
+          className="brand-mark large"
+          src="/favicon.png"
+          alt="Logo Bệnh viện Thống Nhất"
+          style={{ objectFit: "contain", background: "transparent" }}
+        />
         <h1>{APP_TITLE}</h1>
         <p>Đăng nhập để xem và cập nhật lịch khám.</p>
         <label>
-          <span>Tên đăng nhập</span>
-          <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required />
+          Tên đăng nhập
+          <input
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            autoComplete="username"
+            autoFocus
+            required
+          />
         </label>
         <label>
-          <span>Mật khẩu</span>
+          Mật khẩu
           <input
             type="password"
             value={password}
@@ -689,11 +790,11 @@ function LoginScreen({
           />
         </label>
         {error && <div className="form-error" role="alert">{error}</div>}
-        <button type="submit" className="primary-btn" disabled={submitting}>
+        <button type="submit" className="primary-btn wide" disabled={submitting}>
           {submitting ? "Đang đăng nhập..." : "Đăng nhập"}
         </button>
       </form>
-    </div>
+    </main>
   );
 }
 
@@ -824,8 +925,14 @@ function SwapAcceptScreen({
   }, [token]);
 
   return (
-    <div className="login-shell">
+    <main className="login-page">
       <div className="login-card" style={{ maxWidth: 520 }}>
+        <img
+          className="brand-mark large"
+          src="/favicon.png"
+          alt="Logo Bệnh viện Thống Nhất"
+          style={{ objectFit: "contain", background: "transparent" }}
+        />
         <h1>Yêu cầu đổi ngày làm</h1>
         {error && <div className="form-error" role="alert">{error}</div>}
         {!swap && !error && <p>Đang tải yêu cầu...</p>}
@@ -891,8 +998,8 @@ function SwapAcceptScreen({
             )}
           </>
         )}
-        <button type="button" className="tool-btn" onClick={onDone}>Về trang lịch</button>
+        <button type="button" className="tool-btn wide" onClick={onDone}>Về trang lịch</button>
       </div>
-    </div>
+    </main>
   );
 }

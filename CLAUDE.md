@@ -41,9 +41,11 @@ Three layers, deliberately few files:
 
 - `src/shared/` — types and **all business rules**, imported by both the worker and the React app so validation runs identically on each side. `schedule.ts` holds date/month/rotation math; `validation.ts` holds permission and input rules.
 - `src/worker/index.ts` — one Cloudflare Worker: non-`/api/*` requests go to the `ASSETS` binding (SPA), `/api/*` goes through `routeApi`, a flat ordered chain of `path`/`method` checks. Errors are thrown as `HttpError(status, vietnameseMessage)` and caught in `fetch`.
-- `src/app/` — React 19 SPA. `App.tsx` is the shell (login, month navigation, tabs, notifications, swap-accept screen); views live in `ScheduleView.tsx`, `ScheduleTools.tsx` (work days + rotation dialog), `AdminViews.tsx` (departments, users, history, settings, profile) and `ReportView.tsx`. Shared bits: `common.tsx`, `scheduleExport.ts` (PNG/Excel), `reportWordExport.ts` (docx+jszip), `lunar.ts`.
+- `src/app/` — React 19 SPA. `App.tsx` is the shell (login, month navigation, tabs, notifications, swap-accept screen); views live in `ScheduleView.tsx`, `ScheduleTools.tsx` (work days, per-position rotation dialog, sections/positions manager), `AdminViews.tsx` (departments, users, history, settings, profile) and `ReportView.tsx`. Shared bits: `common.tsx`, `scheduleExport.ts` (PNG/Excel), `reportWordExport.ts` (docx+jszip), `lunar.ts`.
 
 A Postgres client is created **per request** in `fetch` (`createPostgresClient` → `connect` → `end`), routed through Cloudflare Hyperdrive.
+
+**Hyperdrive query caching must stay disabled** (`wrangler hyperdrive update <id> --caching-disabled`). It is on by default with a 60s TTL and this app reads back its own writes in the same request (every mutating endpoint returns a fresh list), so caching makes the UI look like nothing saved — and it also caches the session lookup.
 
 ## Database: D1-shaped SQL running on PostgreSQL
 
@@ -67,14 +69,16 @@ Route handlers are not integration-tested. Instead, SQL/logic fragments are **ex
 ## Domain rules worth knowing before editing
 
 - **Work days are the calendar.** `work_days` (date PK + `session` = `morning`/`afternoon`/`full`) is what the schedule is built from; there is no continuous week. The schedule view is month-based (`?month=YYYY-MM`) and each work day is one column. `assignments.date` and `work_reports.date` reference `work_days(date)` with `ON DELETE CASCADE`, so deleting a work day deletes its assignments and report.
-- **Rows.** Row 1 is the coordinator row (`coordinator_assignments`, admin-assigned only). Below it, one row per department (`departments`), and the cell content is the person + phone stored on `assignments`.
-- **Rotation advances per work day, not per calendar day** — `rotationTurnIndex(workDays, date, startDate, turnCount)` uses the ordinal position among work days ≥ `startDate`. `POST /api/rotation/apply` regenerates a whole month's assignments and re-attaches any person name/phone already filled for the same date+department.
+- **Rows.** Row 1 is the coordinator row (`coordinator_assignments`, admin-assigned only). Below it, rows are **examination positions** (`positions`, e.g. "Khám nội") grouped under user-defined `sections`. Both are admin-only, managed from the Cấu hình page. A cell holds any number of departments (`assignments`, unique per position+date+department), each carrying the person name + phone the department fills in.
+- **Rotation is per position** — one `rotations` row per position, its turns in `rotation_members`. A turn may contain several departments, all of which stand at that position that day. `rotationTurnIndex(workDays, date, startDate, turnCount)` advances per **work day**, not per calendar day. `POST /api/rotations/:positionId/apply` rebuilds that position's month; `POST /api/rotations/apply` does every enabled position. Both re-attach any person name/phone already filled for the same position+date+department.
 - **Who may edit what**: `canManageSchedule(role)` (admin | dieu_phoi) gates scheduling; `requireAdmin` gates departments, users, settings **and the coordinator row**. Coordinators change their own days only through the swap-request flow (`swap_requests`, token-based, needs the other coordinator's consent) — that is why they cannot assign the coordinator row directly.
 - **Person edit window**: departments edit their own cell while `date >= today`; the `lock_person_on_workday` setting tightens it to `date > today`. Enforced in three places that must stay in sync — `canEditPersonOnDate`, `canEditAssignmentPerson`, and the SQL predicate built by `assignmentPersonUpdate`.
-- **Reports**: only a scheduler creates/edits the numbers; each department signs its own attendance row (`work_report_attendance`); the coordinator assigned that day (or admin) signs off on `work_reports`. After that signature only admin can still edit.
+- **Reports**: only a scheduler creates/edits the numbers; attendance and signatures are keyed by **assignment** (`work_report_attendance.assignment_id`) because one department can stand at several positions on the same day; the coordinator assigned that day (or admin) signs off on `work_reports`. After that signature only admin can still edit.
 - Dates/times are handled in `Asia/Ho_Chi_Minh` (`APP_TIME_ZONE`, `todayInVietnam`) while raw date arithmetic runs in UTC on ISO strings.
 
 ## Frontend detail
+
+`styles.css` styles bare `input`/`select`/`textarea` with `width: 100%; min-height: 44px; border...`, which also hits checkboxes and radios. The reset in the appended block at the end of the file fixes that — keep it, or every new checkbox renders as a full-width white box.
 
 The schedule grid has a variable number of columns. `ScheduleView` sets `--day-count` on `.schedule-table-wrap`; the CSS block appended at the end of `styles.css` derives `grid-template-columns` and `min-width` from it for both `.schedule-grid` and `.section-label`. Earlier rules in that file still hard-code 7 columns — the appended block overrides them, so keep new grid rules after it.
 

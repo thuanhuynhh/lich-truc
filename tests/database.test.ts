@@ -93,14 +93,20 @@ describe("câu lệnh SQL của worker", () => {
     expect(lookup.bindings).toHaveLength(25);
   });
 
-  it("inserts every rotation turn with one statement", () => {
+  it("inserts every rotation turn of one position with a single statement", () => {
     const turns = Array.from({ length: 25 }, (_, index) => [index + 1]);
-    const insert = rotationMembersInsert(turns);
+    const insert = rotationMembersInsert(7, turns);
 
-    expect(insert.sql.match(/\(\?, \?, \?\)/g)).toHaveLength(25);
+    expect(insert.sql.match(/\(\?, \?, \?, \?\)/g)).toHaveLength(25);
     expect(insert.sql.match(/INSERT INTO rotation_members/g)).toHaveLength(1);
-    expect(insert.bindings).toHaveLength(75);
-    expect(insert.bindings.slice(0, 6)).toEqual([0, 1, 0, 1, 2, 0]);
+    expect(insert.bindings).toHaveLength(100);
+    expect(insert.bindings.slice(0, 8)).toEqual([7, 0, 1, 0, 7, 1, 2, 0]);
+  });
+
+  it("keeps several departments inside one turn", () => {
+    const insert = rotationMembersInsert(3, [[10, 11], [12]]);
+
+    expect(insert.bindings).toEqual([3, 0, 10, 0, 3, 0, 11, 1, 3, 1, 12, 0]);
   });
 
   it("xóa phân công theo ngày hoặc theo cả tháng", () => {

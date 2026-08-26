@@ -1,12 +1,12 @@
 import { MutableRefObject, useState } from "react";
-import { ArrowLeftRight, Check, Phone, Plus, Trash2, UserRound } from "lucide-react";
+import { ArrowLeftRight, Check, ListOrdered, Phone, Plus, RefreshCw, Trash2, UserRound } from "lucide-react";
 import type {
   Assignment,
   CoordinatorAssignment,
-  Department,
+  Position,
   ScheduleResponse,
-  User,
-  WorkDay
+  Section,
+  User
 } from "../shared/types";
 import {
   SESSION_LABELS,
@@ -18,17 +18,19 @@ import {
 } from "../shared/schedule";
 import { canManageSchedule } from "../shared/validation";
 import { formatLunarDate } from "./lunar";
+import { DepartmentSearchSelect } from "./common";
 
 export interface ScheduleViewProps {
   data: ScheduleResponse;
   user: User;
   showLunar: boolean;
-  lockPersonOnWorkDay: boolean;
   tableRef: MutableRefObject<HTMLDivElement | null>;
-  onAddAssignment: (date: string, departmentId: number) => void;
-  onDeleteAssignment: (assignment: Assignment) => void;
-  onMoveAssignment: (assignmentId: number, date: string) => void;
+  onAddAssignment: (positionId: number, date: string, departmentId: number) => void;
+  onDeleteAssignment: (assignment: Assignment, position: Position) => void;
+  onMoveAssignment: (assignmentId: number, positionId: number, date: string) => void;
   onSavePerson: (assignment: Assignment, personName: string, personPhone: string) => Promise<boolean>;
+  onOpenRotation: (position: Position) => void;
+  onApplyRotation: (position: Position) => void;
   onAddCoordinator: (date: string, userId: number) => void;
   onDeleteCoordinator: (item: CoordinatorAssignment) => void;
   onMoveCoordinator: (id: number, date: string) => void;
@@ -39,12 +41,13 @@ export function ScheduleView({
   data,
   user,
   showLunar,
-  lockPersonOnWorkDay,
   tableRef,
   onAddAssignment,
   onDeleteAssignment,
   onMoveAssignment,
   onSavePerson,
+  onOpenRotation,
+  onApplyRotation,
   onAddCoordinator,
   onDeleteCoordinator,
   onMoveCoordinator,
@@ -52,6 +55,7 @@ export function ScheduleView({
 }: ScheduleViewProps) {
   const [draggedAssignmentId, setDraggedAssignmentId] = useState<number | null>(null);
   const [draggedCoordinatorId, setDraggedCoordinatorId] = useState<number | null>(null);
+  const [picker, setPicker] = useState<Record<string, number | "">>({});
   const [selectedCoordinator, setSelectedCoordinator] = useState<Record<string, number | "">>({});
   const [swapSource, setSwapSource] = useState<CoordinatorAssignment | null>(null);
 
@@ -59,7 +63,8 @@ export function ScheduleView({
   const canSchedule = canManageSchedule(user.role);
   const isCoordinator = user.role === "dieu_phoi";
   const today = todayInVietnam();
-  const visibleDepartments = departmentsToShow(data);
+  const lockPerson = !!data.lockPersonOnWorkDay;
+  const activeDepartments = data.departments.filter((department) => department.active);
 
   if (data.workDays.length === 0) {
     return (
@@ -74,12 +79,38 @@ export function ScheduleView({
     );
   }
 
+  if (data.positions.length === 0) {
+    return (
+      <div className="empty-schedule-card">
+        <h2>Chưa có vị trí khám nào</h2>
+        <p>
+          {isAdmin
+            ? "Vào tab “Cấu hình” để thêm mục và vị trí khám (ví dụ Khám nội, Khám ngoại). Mỗi vị trí là một hàng của bảng lịch và có tua riêng."
+            : "Quản lý chưa cấu hình vị trí khám nào."}
+        </p>
+      </div>
+    );
+  }
+
   const gridStyle = { "--day-count": data.workDays.length } as React.CSSProperties;
+  const sections = [...data.sections].sort((left, right) => left.sortOrder - right.sortOrder);
+  const orphanPositions = data.positions.filter(
+    (position) => !sections.some((section) => section.id === position.sectionId)
+  );
+  const groups: Array<{ section: Section; positions: Position[] }> = [
+    ...sections.map((section) => ({
+      section,
+      positions: data.positions.filter((position) => position.sectionId === section.id)
+    })),
+    ...(orphanPositions.length > 0
+      ? [{ section: { id: 0, label: "Chưa phân mục", sortOrder: 9999 }, positions: orphanPositions }]
+      : [])
+  ];
 
   return (
     <div className="schedule-table-wrap" ref={tableRef} style={gridStyle}>
       <div className="schedule-grid day-header-row">
-        <div className="unit-head">KHOA PHÒNG</div>
+        <div className="unit-head">VỊ TRÍ KHÁM</div>
         {data.workDays.map((workDay) => (
           <div className="day-head" key={workDay.date}>
             <strong>{getWeekdayLabel(workDay.date)} {formatDate(workDay.date)}</strong>
@@ -91,7 +122,7 @@ export function ScheduleView({
       </div>
 
       <div className="section-label">
-        <span className="section-label-text">I. ĐIỀU PHỐI</span>
+        <span className="section-label-text">ĐIỀU PHỐI</span>
       </div>
       <div className="schedule-grid schedule-row">
         <div className="unit-name row-coordinator">
@@ -101,7 +132,7 @@ export function ScheduleView({
         {data.workDays.map((workDay) => {
           const cellKey = `coordinator-${workDay.date}`;
           const items = data.coordinatorAssignments.filter((item) => item.date === workDay.date);
-          const availableCoordinators = data.coordinators.filter(
+          const available = data.coordinators.filter(
             (coordinator) => !items.some((item) => item.userId === coordinator.id)
           );
           return (
@@ -121,7 +152,8 @@ export function ScheduleView({
               <div className="assignment-list">
                 {items.map((item) => {
                   const isMine = item.userId === user.id;
-                  const canSwapWith = isCoordinator && !isMine && item.date >= today && myFutureDays(data, user, today).length > 0;
+                  const canSwapWith =
+                    isCoordinator && !isMine && item.date >= today && myFutureDays(data, user, today).length > 0;
                   return (
                     <span
                       key={item.id}
@@ -155,7 +187,7 @@ export function ScheduleView({
                   );
                 })}
               </div>
-              {isAdmin && availableCoordinators.length > 0 && (
+              {isAdmin && available.length > 0 && (
                 <div className="cell-add">
                   <select
                     value={selectedCoordinator[cellKey] || ""}
@@ -165,7 +197,7 @@ export function ScheduleView({
                     }
                   >
                     <option value="">Chọn</option>
-                    {availableCoordinators.map((coordinator) => (
+                    {available.map((coordinator) => (
                       <option key={coordinator.id} value={coordinator.id}>
                         {coordinator.fullName || coordinator.username}
                       </option>
@@ -192,62 +224,126 @@ export function ScheduleView({
         })}
       </div>
 
-      <div className="section-label">
-        <span className="section-label-text">II. KHOA PHÒNG THAM GIA</span>
-      </div>
-      {visibleDepartments.map((department) => (
-        <div className="schedule-grid schedule-row" key={department.id}>
-          <div className="unit-name row-department">
-            <span>{department.name}</span>
-            {!department.active && <small>Đã ngừng hoạt động</small>}
+      {groups.map(({ section, positions }) => (
+        <div key={section.id}>
+          <div className="section-label">
+            <span className="section-label-text">{section.label}</span>
           </div>
-          {data.workDays.map((workDay) => {
-            const assignment = data.assignments.find(
-              (item) => item.departmentId === department.id && item.date === workDay.date
-            );
-            const canEditOwnPerson =
-              !!assignment &&
-              user.role === "khoa_phong" &&
-              user.departmentId === department.id &&
-              canEditPersonOnDate(workDay.date, today, lockPersonOnWorkDay);
-
+          {positions.length === 0 && (
+            <div className="schedule-grid schedule-row">
+              <div className="unit-name row-position empty-position">
+                <span>Mục này chưa có vị trí khám</span>
+              </div>
+              {data.workDays.map((workDay) => (
+                <div className="day-cell" key={workDay.date} />
+              ))}
+            </div>
+          )}
+          {positions.map((position) => {
+            const rotation = data.rotations.find((item) => item.positionId === position.id);
+            const hasTurns = !!rotation && rotation.turns.some((turn) => turn.length > 0);
             return (
-              <div
-                key={workDay.date}
-                className="day-cell"
-                onDragOver={(event) => {
-                  if (canSchedule && draggedAssignmentId) event.preventDefault();
-                }}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  if (canSchedule && draggedAssignmentId) onMoveAssignment(draggedAssignmentId, workDay.date);
-                  setDraggedAssignmentId(null);
-                }}
-              >
-                {assignment ? (
-                  <PersonCell
-                    assignment={assignment}
-                    canDrag={canSchedule}
-                    canDelete={canSchedule}
-                    canEdit={canSchedule || canEditOwnPerson}
-                    onDelete={() => onDeleteAssignment(assignment)}
-                    onDragStart={() => setDraggedAssignmentId(assignment.id)}
-                    onDragEnd={() => setDraggedAssignmentId(null)}
-                    onSave={(name, phone) => onSavePerson(assignment, name, phone)}
-                  />
-                ) : (
-                  <span className="empty-note">Trống</span>
-                )}
-                {canSchedule && !assignment && department.active && (
-                  <button
-                    type="button"
-                    className="cell-add-btn"
-                    aria-label={`Phân công ${department.name} ngày ${workDay.date}`}
-                    onClick={() => onAddAssignment(workDay.date, department.id)}
-                  >
-                    <Plus size={14} /> Phân công
-                  </button>
-                )}
+              <div className="schedule-grid schedule-row" key={position.id}>
+                <div className="unit-name row-position">
+                  <span>{position.label}</span>
+                  {!position.active && <small>Đã ngừng hoạt động</small>}
+                  {hasTurns && (
+                    <small>{rotation!.turns.length} tua · từ {formatDate(rotation!.startDate)}</small>
+                  )}
+                  {canSchedule && (
+                    <div className="unit-actions">
+                      <button
+                        type="button"
+                        className="unit-action"
+                        onClick={() => onOpenRotation(position)}
+                        title="Cấu hình tua cho vị trí này"
+                      >
+                        <ListOrdered size={12} /> Tua
+                      </button>
+                      {hasTurns && (
+                        <button
+                          type="button"
+                          className="unit-action"
+                          onClick={() => onApplyRotation(position)}
+                          title="Áp tua của vị trí này cho tháng đang xem"
+                        >
+                          <RefreshCw size={12} /> Áp tua
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {data.workDays.map((workDay) => {
+                  const cellKey = `${position.id}-${workDay.date}`;
+                  const cells = data.assignments.filter(
+                    (item) => item.positionId === position.id && item.date === workDay.date
+                  );
+                  return (
+                    <div
+                      key={workDay.date}
+                      className="day-cell"
+                      onDragOver={(event) => {
+                        if (canSchedule && draggedAssignmentId) event.preventDefault();
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        if (canSchedule && draggedAssignmentId) {
+                          onMoveAssignment(draggedAssignmentId, position.id, workDay.date);
+                        }
+                        setDraggedAssignmentId(null);
+                      }}
+                    >
+                      {cells.length === 0 && <span className="empty-note">Trống</span>}
+                      <div className="cell-stack">
+                        {cells.map((assignment) => (
+                          <AssignmentCell
+                            key={assignment.id}
+                            assignment={assignment}
+                            canDrag={canSchedule}
+                            canDelete={canSchedule}
+                            canEdit={
+                              canSchedule ||
+                              (user.role === "khoa_phong" &&
+                                user.departmentId === assignment.departmentId &&
+                                canEditPersonOnDate(workDay.date, today, lockPerson))
+                            }
+                            onDelete={() => onDeleteAssignment(assignment, position)}
+                            onDragStart={() => setDraggedAssignmentId(assignment.id)}
+                            onDragEnd={() => setDraggedAssignmentId(null)}
+                            onSave={(name, phone) => onSavePerson(assignment, name, phone)}
+                          />
+                        ))}
+                      </div>
+                      {canSchedule && position.active && (
+                        <div className="cell-add">
+                          <DepartmentSearchSelect
+                            value={picker[cellKey] ?? ""}
+                            options={activeDepartments.filter(
+                              (department) => !cells.some((cell) => cell.departmentId === department.id)
+                            )}
+                            placeholder="Thêm khoa"
+                            ariaLabel={`Thêm khoa phòng cho ${position.label} ngày ${workDay.date}`}
+                            onChange={(value) => setPicker((prev) => ({ ...prev, [cellKey]: value }))}
+                          />
+                          <button
+                            type="button"
+                            className="mini-icon-btn"
+                            disabled={!picker[cellKey]}
+                            aria-label="Thêm phân công"
+                            onClick={() => {
+                              const departmentId = Number(picker[cellKey]);
+                              if (!departmentId) return;
+                              onAddAssignment(position.id, workDay.date, departmentId);
+                              setPicker((prev) => ({ ...prev, [cellKey]: "" }));
+                            }}
+                          >
+                            <Plus size={15} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             );
           })}
@@ -271,17 +367,11 @@ export function ScheduleView({
   );
 }
 
-/** Khoa phòng có phân công trong tháng, cộng thêm khoa phòng đang hoạt động. */
-function departmentsToShow(data: ScheduleResponse): Department[] {
-  const assigned = new Set(data.assignments.map((assignment) => assignment.departmentId));
-  return data.departments.filter((department) => department.active || assigned.has(department.id));
-}
-
 function myFutureDays(data: ScheduleResponse, user: User, today: string): CoordinatorAssignment[] {
   return data.coordinatorAssignments.filter((item) => item.userId === user.id && item.date >= today);
 }
 
-function PersonCell({
+function AssignmentCell({
   assignment,
   canDrag,
   canDelete,
@@ -317,6 +407,7 @@ function PersonCell({
           if (saved) setEditing(false);
         }}
       >
+        <strong className="person-department">{assignment.departmentName}</strong>
         <input
           value={name}
           onChange={(event) => setName(event.target.value)}
@@ -358,15 +449,16 @@ function PersonCell({
       draggable={canDrag}
       onDragStart={() => canDrag && onDragStart()}
       onDragEnd={onDragEnd}
-      title={canDrag ? "Kéo sang ngày khác để chuyển phân công" : undefined}
+      title={canDrag ? "Kéo sang ô khác để chuyển phân công" : undefined}
     >
+      <strong className="person-department">{assignment.departmentName}</strong>
       <span className="person-name">
-        <UserRound size={13} aria-hidden="true" />
+        <UserRound size={12} aria-hidden="true" />
         {assignment.personName || "Chưa điền tên"}
       </span>
       {assignment.personPhone && (
         <a className="person-phone" href={`tel:${assignment.personPhone.replace(/[^\d+]/g, "")}`}>
-          <Phone size={12} aria-hidden="true" />
+          <Phone size={11} aria-hidden="true" />
           {assignment.personPhone}
         </a>
       )}
@@ -415,8 +507,8 @@ function SwapDialog({
           <div>
             <h2>Xin đổi ngày làm</h2>
             <p>
-              Đổi với <strong>{target.fullName || target.username}</strong> ngày{" "}
-              {formatDate(target.date)} ({sessionOf(target.date)}). Yêu cầu chỉ có hiệu lực khi đối phương đồng ý.
+              Đổi với <strong>{target.fullName || target.username}</strong> ngày {formatDate(target.date)} (
+              {sessionOf(target.date)}). Yêu cầu chỉ có hiệu lực khi đối phương đồng ý.
             </p>
           </div>
           <button type="button" className="icon-btn" onClick={onClose} aria-label="Đóng">×</button>

@@ -3837,7 +3837,7 @@ button:focus-visible {
 .attendance-head,
 .attendance-row {
   display: grid;
-  grid-template-columns: 1.5fr 1.4fr 1fr .6fr 1.5fr;
+  grid-template-columns: 1.2fr 1.3fr 1.3fr .9fr .6fr 1.4fr;
   gap: 10px;
   align-items: center;
   padding: 8px 10px;
@@ -4029,6 +4029,189 @@ button:focus-visible {
   }
 
   .department-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Reset checkbox/radio: quy tắc `input { width:100%; min-height:44px }` ở đầu
+   file biến ô tích thành hộp trắng full-width nên trông như bấm không được. */
+input[type="checkbox"],
+input[type="radio"] {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+input[type="checkbox"]:disabled,
+input[type="radio"]:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.settings-toggle input[type="checkbox"] {
+  margin-top: 3px;
+}
+
+/* Tab có icon nên cần canh giữa icon với chữ. */
+.tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Nút phân công khoa phòng trong ô lịch còn trống. */
+.cell-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  padding: 3px 7px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--primary);
+  font-size: .74rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.cell-add-btn:hover {
+  border-style: solid;
+  border-color: var(--primary);
+  background: #f0fdfa;
+}
+
+.empty-list-text {
+  padding: 14px 12px;
+  color: var(--muted);
+  font-size: .88rem;
+  text-align: center;
+}
+
+/* ===== Hàng vị trí khám ===== */
+.unit-name.row-position {
+  background: var(--blue);
+}
+
+.unit-name.row-position.empty-position {
+  background: #94a3b8;
+  font-weight: 700;
+  font-style: italic;
+}
+
+/* Một ô có thể chứa nhiều khoa phòng cùng đứng vị trí đó. */
+.cell-stack {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+}
+
+.person-department {
+  font-size: .78rem;
+  font-weight: 800;
+  color: var(--blue);
+  line-height: 1.2;
+}
+
+.cell-stack .person-cell {
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--line);
+}
+
+.cell-stack .person-cell:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+/* ===== Quản lý mục và vị trí khám trong trang Cấu hình ===== */
+.section-manager {
+  display: grid;
+  gap: 14px;
+}
+
+.section-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.section-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.section-card-head h3 {
+  margin: 0;
+  font-size: 1rem;
+  flex: 1;
+  min-width: 160px;
+}
+
+.section-card-head input {
+  flex: 1;
+  min-width: 180px;
+}
+
+.section-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.position-list {
+  display: grid;
+  gap: 8px;
+}
+
+.position-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.position-name {
+  flex: 1;
+  min-width: 150px;
+  font-weight: 700;
+}
+
+.position-name em {
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.position-row input {
+  flex: 1;
+  min-width: 180px;
+}
+
+.position-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 860px) {
+  .attendance-head,
+  .attendance-row {
     grid-template-columns: 1fr;
   }
 }

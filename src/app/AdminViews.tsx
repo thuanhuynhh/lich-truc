@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Building2,
   ChevronLeft,
@@ -635,7 +635,13 @@ export function HistoryView({
   );
 }
 
-export function SettingsView({ notify }: { notify: (message: string) => void }) {
+export function SettingsView({
+  notify,
+  positionsManager
+}: {
+  notify: (message: string) => void;
+  positionsManager?: React.ReactNode;
+}) {
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -659,9 +665,15 @@ export function SettingsView({ notify }: { notify: (message: string) => void }) 
   }
 
   return (
-    <main className="content-grid">
-      <section className="panel">
-        <PanelTitle icon={<Sliders size={17} />} title="Cấu hình hệ thống" />
+    <main className="profile-settings-layout">
+      <section className="settings-panel profile-settings-card">
+        <div className="settings-panel-title">
+          <Sliders size={20} />
+          <span>Cấu hình hệ thống</span>
+        </div>
+        <p className="profile-settings-intro">
+          Cấu hình áp dụng cho toàn bộ hệ thống. Thay đổi được lưu ngay khi bấm.
+        </p>
         {!settings ? (
           <span className="empty-note">Đang tải cấu hình...</span>
         ) : (
@@ -684,6 +696,7 @@ export function SettingsView({ notify }: { notify: (message: string) => void }) 
           </div>
         )}
       </section>
+      {positionsManager}
     </main>
   );
 }
