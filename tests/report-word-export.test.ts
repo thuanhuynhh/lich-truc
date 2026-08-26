@@ -1,36 +1,38 @@
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
-import {
-  getReportExportPeriod,
-  isDateInReportPeriod
-} from "../src/app/reportExportPeriod";
-import { createDutyReportsZip } from "../src/app/reportWordExport";
-import type { DutyReport } from "../src/shared/types";
+import { getReportExportPeriod, isDateInReportPeriod } from "../src/app/reportExportPeriod";
+import { createWorkReportsZip } from "../src/app/reportWordExport";
+import type { AttendanceEntry, WorkReport } from "../src/shared/types";
 
-function makeReport(date: string): DutyReport {
+function attendance(departmentName: string, present: boolean): AttendanceEntry {
+  return {
+    departmentId: departmentName.length,
+    departmentName,
+    personName: "Nguyễn Văn A",
+    personPhone: "0901234567",
+    present,
+    note: null,
+    signature: null,
+    signatureName: null,
+    signatureAt: null
+  };
+}
+
+function makeReport(date: string): WorkReport {
   return {
     date,
+    session: "full",
     reportDate: date,
     reportTime: "07:00",
-    bsTruc: "An",
-    ktvTruc: "Bình",
-    xqKhoa: 12,
-    xqGiuong: 3,
-    mri: 4,
-    ctScan: 5,
-    thuocSuDung: "Không",
-    caKho: "",
-    thietBi: "Tốt",
-    anNinh: "Tốt",
-    signatureBs: null,
-    signatureBsName: null,
-    signatureBsAt: null,
-    signatureKtv: null,
-    signatureKtvName: null,
-    signatureKtvAt: null,
-    signatureLanhdao: null,
-    signatureLanhdaoName: null,
-    signatureLanhdaoAt: null
+    soLuotKham: 120,
+    soHoSo: 118,
+    vatTu: "120 bộ test đường huyết",
+    suCo: "",
+    deXuat: "",
+    signatureDieuPhoi: null,
+    signatureDieuPhoiName: null,
+    signatureDieuPhoiAt: null,
+    attendance: [attendance("Khoa Nội", true), attendance("Khoa Ngoại", false)]
   };
 }
 
@@ -48,16 +50,13 @@ describe("bulk Word report export", () => {
   });
 
   it("creates a ZIP with one valid DOCX per report", async () => {
-    const output = await createDutyReportsZip([
-      makeReport("2026-07-17"),
-      makeReport("2026-07-16")
-    ]);
+    const output = await createWorkReportsZip([makeReport("2026-07-17"), makeReport("2026-07-16")]);
     const zip = await JSZip.loadAsync(await output.arrayBuffer());
     const filenames = Object.keys(zip.files).sort();
 
     expect(filenames).toEqual([
-      "bao-cao-truc-2026-07-16.docx",
-      "bao-cao-truc-2026-07-17.docx"
+      "bao-cao-lam-viec-2026-07-16.docx",
+      "bao-cao-lam-viec-2026-07-17.docx"
     ]);
 
     const firstDocx = await zip.file(filenames[0])!.async("uint8array");

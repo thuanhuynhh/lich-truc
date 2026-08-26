@@ -3614,3 +3614,421 @@ button:focus-visible {
     grid-template-columns: 1fr 1fr 2fr !important;
   }
 }
+
+/* ===== Lịch khám sức khỏe toàn dân =====
+   Số cột của bảng lịch bằng số ngày làm trong tháng, nên lưới dùng biến
+   --day-count do ScheduleView đặt trên .schedule-table-wrap. */
+.schedule-table-wrap {
+  --day-column: 168px;
+}
+
+.schedule-grid {
+  grid-template-columns: 220px repeat(var(--day-count, 7), minmax(var(--day-column), 1fr));
+  min-width: calc(220px + var(--day-count, 7) * var(--day-column));
+}
+
+.section-label {
+  min-width: calc(220px + var(--day-count, 7) * var(--day-column));
+}
+
+.day-head strong {
+  font-size: .84rem;
+}
+
+.day-head-note {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: .7rem;
+  font-weight: 750;
+  background: rgba(255, 255, 255, .22);
+  color: #fff;
+}
+
+.session-badge.session-morning {
+  background: #fde68a;
+  color: #713f12;
+}
+
+.session-badge.session-afternoon {
+  background: #bfdbfe;
+  color: #1e3a8a;
+}
+
+.session-badge.session-full {
+  background: #bbf7d0;
+  color: #14532d;
+}
+
+.unit-name.row-coordinator {
+  background: var(--primary);
+}
+
+.unit-name.row-department {
+  background: var(--blue);
+}
+
+.person-pill.coordinator {
+  background: #ccfbf1;
+  color: #115e59;
+  border-color: #99f6e4;
+}
+
+.person-pill.coordinator.mine {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary-dark);
+}
+
+/* Ô người làm việc: họ tên, số điện thoại và các nút sửa/xóa. */
+.person-cell {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  font-size: .82rem;
+}
+
+.person-cell.person-cell-empty .person-name {
+  color: var(--muted);
+  font-style: italic;
+  font-weight: 600;
+}
+
+.person-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.person-phone {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--primary);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.person-phone:hover {
+  text-decoration: underline;
+}
+
+.person-cell-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.cell-link-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: .74rem;
+  font-weight: 700;
+  color: var(--primary);
+  cursor: pointer;
+}
+
+.cell-link-btn.danger {
+  color: var(--danger);
+}
+
+.person-edit-form {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+}
+
+.person-edit-form input {
+  width: 100%;
+  padding: 4px 6px;
+  font-size: .78rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  min-height: auto;
+}
+
+.person-edit-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.empty-schedule-card {
+  margin: 24px auto;
+  max-width: 560px;
+  padding: 28px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  text-align: center;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, .07);
+}
+
+.empty-schedule-card h2 {
+  margin: 0 0 8px;
+  font-size: 1.1rem;
+}
+
+.empty-schedule-card p {
+  margin: 0;
+  color: var(--muted);
+}
+
+/* Bảng quản lý ngày làm việc. */
+.workday-table {
+  display: grid;
+  gap: 2px;
+}
+
+.workday-table-head,
+.workday-row {
+  display: grid;
+  grid-template-columns: 1.4fr .8fr 2fr .9fr 1.6fr;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 10px;
+}
+
+.workday-table-head {
+  background: var(--surface-2);
+  border-radius: 6px;
+  font-size: .8rem;
+  font-weight: 750;
+  color: var(--muted);
+}
+
+.workday-row {
+  border-bottom: 1px solid var(--line);
+}
+
+.workday-row small {
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.workday-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.department-row {
+  grid-template-columns: 2fr .8fr 1.6fr;
+}
+
+/* Bảng điểm danh trong báo cáo làm việc. */
+.attendance-table {
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.attendance-head,
+.attendance-row {
+  display: grid;
+  grid-template-columns: 1.5fr 1.4fr 1fr .6fr 1.5fr;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+}
+
+.attendance-head {
+  background: var(--surface-2);
+  font-size: .8rem;
+  font-weight: 750;
+  color: var(--muted);
+}
+
+.attendance-row {
+  border-top: 1px solid var(--line);
+  font-size: .86rem;
+}
+
+.attendance-present {
+  text-align: center;
+}
+
+.attendance-signature .saved-signature-display img {
+  max-height: 44px;
+}
+
+.signature-role-hint {
+  margin: 0 0 6px;
+  font-size: .78rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+.paper-note {
+  margin: 6px 0 0;
+  font-style: italic;
+  color: var(--muted);
+}
+
+/* Ô chọn khoa phòng có tìm kiếm. */
+.search-select {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.search-select-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.search-select-control input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  padding: 2px 0;
+  font-size: .78rem;
+  min-height: auto;
+}
+
+.search-select-clear {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.search-select-list {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 12px 24px rgba(15, 23, 42, .16);
+}
+
+.search-select-list button {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: .8rem;
+  cursor: pointer;
+}
+
+.search-select-list button:hover,
+.search-select-list button.active {
+  background: var(--surface-2);
+}
+
+.search-select-tag {
+  margin-left: 6px;
+  font-size: .7rem;
+  color: var(--muted);
+}
+
+.search-select-empty {
+  padding: 6px 8px;
+  font-size: .78rem;
+  color: var(--muted);
+}
+
+.turn-add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.settings-toggle-list {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-toggle {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.settings-toggle span {
+  display: grid;
+  gap: 2px;
+}
+
+.settings-toggle small {
+  color: var(--muted);
+}
+
+.notification-item-actions {
+  display: flex;
+  gap: 6px;
+  padding: 0 12px 10px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 860px) {
+  .schedule-table-wrap {
+    --day-column: 128px;
+  }
+
+  .schedule-grid {
+    grid-template-columns: 144px repeat(var(--day-count, 7), var(--day-column));
+    min-width: calc(144px + var(--day-count, 7) * var(--day-column));
+  }
+
+  .section-label {
+    min-width: calc(144px + var(--day-count, 7) * var(--day-column));
+  }
+
+  .workday-table-head,
+  .workday-row,
+  .attendance-head,
+  .attendance-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .workday-table-head,
+  .attendance-head {
+    display: none;
+  }
+
+  .workday-row,
+  .attendance-row {
+    padding: 10px;
+  }
+
+  .department-row {
+    grid-template-columns: 1fr;
+  }
+}

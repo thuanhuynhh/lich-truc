@@ -1,128 +1,120 @@
-import type { Assignment, DutyReport, LeaveDay, Role, ScheduleUnit, Staff, StaffType } from "./types";
-import { acceptsStaffTypeForUnit, staffTypesForUnit } from "./schedule";
+import type { Assignment, Department, Role, SignerRole, WorkReport } from "./types";
+import { canEditPersonOnDate } from "./schedule";
 
-export function isReportRole(value: unknown): value is "bs" | "ktv" | "lanhdao" {
-  return value === "bs" || value === "ktv" || value === "lanhdao";
+const PHONE_PATTERN = /^[0-9+][0-9\s.-]{7,19}$/;
+
+export function isSignerRole(value: unknown): value is SignerRole {
+  return value === "khoa_phong" || value === "dieu_phoi";
 }
 
-export function resolveReportSignerName(value: unknown, staffName?: string | null): string {
+export function isRole(value: unknown): value is Role {
+  return value === "admin" || value === "dieu_phoi" || value === "khoa_phong";
+}
+
+/** Admin và điều phối đều được lên lịch; khoa phòng thì không. */
+export function canManageSchedule(role: Role): boolean {
+  return role === "admin" || role === "dieu_phoi";
+}
+
+export function roleLabel(role: Role): string {
+  if (role === "admin") return "Quản lý";
+  if (role === "dieu_phoi") return "Điều phối";
+  return "Khoa phòng";
+}
+
+export function resolveSignerName(value: unknown, fallbackName?: string | null): string {
   const submittedName = typeof value === "string" ? value.trim() : "";
-  return submittedName || (staffName || "").trim();
+  return submittedName || (fallbackName || "").trim();
 }
 
-export function formatStaffFullName(familyMiddleName: unknown, name: unknown): string {
-  return [familyMiddleName, name]
-    .map((part) => typeof part === "string" ? part.trim() : "")
-    .filter(Boolean)
-    .join(" ");
+export function normalizePhone(value: unknown): string {
+  return typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
 }
 
-type ReportSignatureState = Pick<
-  DutyReport,
-  | "signatureBs"
-  | "signatureBsName"
-  | "signatureBsAt"
-  | "signatureKtv"
-  | "signatureKtvName"
-  | "signatureKtvAt"
-  | "signatureLanhdao"
-  | "signatureLanhdaoName"
-  | "signatureLanhdaoAt"
->;
-
-export function hasReportSignature(report: ReportSignatureState | null | undefined): boolean {
-  if (!report) return false;
-  return [
-    report.signatureBs,
-    report.signatureBsName,
-    report.signatureBsAt,
-    report.signatureKtv,
-    report.signatureKtvName,
-    report.signatureKtvAt,
-    report.signatureLanhdao,
-    report.signatureLanhdaoName,
-    report.signatureLanhdaoAt
-  ].some((value) => Boolean(value));
-}
-
-export function canEditDutyReport(
-  _role: Role,
-  _report: ReportSignatureState | null | undefined
-): boolean {
-  return true;
+export function validatePersonInput(params: { personName: unknown; personPhone: unknown }): string | null {
+  const name = typeof params.personName === "string" ? params.personName.trim() : "";
+  const phone = normalizePhone(params.personPhone);
+  if (!name) return "Hãy nhập họ và tên người làm việc.";
+  if (name.length > 120) return "Họ và tên không được quá 120 ký tự.";
+  if (!phone) return "Hãy nhập số điện thoại liên hệ.";
+  if (!PHONE_PATTERN.test(phone)) return "Số điện thoại liên hệ không hợp lệ.";
+  return null;
 }
 
 export function validateAssignmentInput(params: {
-  unit: ScheduleUnit;
-  staff: Staff;
+  department: Department;
   date: string;
+  workDayDates: string[];
   assignments: Assignment[];
-  leaveDays: LeaveDay[];
   replacingAssignmentId?: number | null;
 }): string | null {
-  const allowedTypes = staffTypesForUnit(params.unit.type);
-  if (params.unit.computed) return "Hàng này được tính tự động, không thể chỉnh trực tiếp.";
-  if (!params.staff.active) return "Nhân sự này đã ngừng hoạt động.";
-  if (!acceptsStaffTypeForUnit(params.unit.type, params.staff.type)) {
-    return `Hàng này chỉ nhận ${allowedTypes.join("/")}.`;
+  if (!params.workDayDates.includes(params.date)) {
+    return "Ngày này chưa được mở làm việc. Hãy thêm ngày làm trước.";
   }
-  const isOnLeave = params.leaveDays.some(
-    (day) => day.date === params.date && day.staffId === params.staff.id
+  if (!params.department.active) return "Khoa phòng này đã ngừng hoạt động.";
+  const duplicated = params.assignments.some(
+    (assignment) =>
+      assignment.date === params.date &&
+      assignment.departmentId === params.department.id &&
+      assignment.id !== params.replacingAssignmentId
   );
-  if (isOnLeave) return "Nhân sự này đang nghỉ phép trong ngày đã chọn.";
-  if (params.unit.maxPerDay !== null) {
-    const count = params.assignments.filter(
-      (assignment) =>
-        assignment.unitId === params.unit.id &&
-        assignment.date === params.date &&
-        assignment.id !== params.replacingAssignmentId
-    ).length;
-    if (count >= params.unit.maxPerDay) {
-      return `${params.unit.label} tối đa ${params.unit.maxPerDay} người/ngày.`;
-    }
-  }
+  if (duplicated) return `${params.department.name} đã có trong ngày ${params.date}.`;
   return null;
 }
 
-export function validateLeaveInput(params: {
-  staff: Staff;
-  dates: string[];
-  leaveDays: LeaveDay[];
-  limitPerType?: number;
+/**
+ * Khoa phòng chỉ sửa được ô của chính mình và chỉ khi ngày làm chưa qua.
+ * Admin và điều phối sửa được mọi lúc.
+ */
+export function canEditAssignmentPerson(params: {
+  role: Role;
+  userDepartmentId: number | null;
+  assignment: Pick<Assignment, "date" | "departmentId">;
+  today?: string;
+  lockOnWorkDay?: boolean;
+}): boolean {
+  if (canManageSchedule(params.role)) return true;
+  if (params.userDepartmentId !== params.assignment.departmentId) return false;
+  return canEditPersonOnDate(params.assignment.date, params.today, params.lockOnWorkDay);
+}
+
+/**
+ * Điều phối chỉ được xin đổi ngày làm với một điều phối khác, và chỉ với ngày
+ * chưa qua. Admin xếp lịch trực tiếp nên không đi qua luồng này.
+ */
+export function validateCoordinatorSwap(params: {
+  source: { id: number; userId: number; date: string };
+  target: { id: number; userId: number; date: string };
+  requesterUserId: number;
+  today: string;
 }): string | null {
-  const limit = params.limitPerType ?? 2;
-  if (!params.staff.active) return "Nhân sự này đã ngừng hoạt động.";
-  if (params.dates.length === 0) return "Cần chọn ít nhất một ngày nghỉ.";
-  const uniqueDates = new Set(params.dates);
-  if (uniqueDates.size !== params.dates.length) return "Ngày nghỉ bị trùng.";
-  for (const date of uniqueDates) {
-    const blockedReason = getLeaveDateBlockReason(params.staff, date, params.leaveDays, limit);
-    if (blockedReason) return blockedReason;
+  if (params.source.id === params.target.id) return "Không thể đổi với chính ngày làm đó.";
+  if (params.source.userId !== params.requesterUserId) return "Chỉ được xin đổi ngày làm của chính mình.";
+  if (params.target.userId === params.requesterUserId) return "Hãy chọn ngày làm của một điều phối khác.";
+  if (params.source.date < params.today || params.target.date < params.today) {
+    return "Chỉ đổi được ngày làm chưa qua.";
   }
   return null;
 }
 
-export function getLeaveDateBlockReason(
-  staff: Staff,
-  date: string,
-  leaveDays: LeaveDay[],
-  limitPerType = 2
-): string | null {
-  const alreadyLeave = leaveDays.some(
-    (day) => day.date === date && day.staffId === staff.id
-  );
-  if (alreadyLeave) return `${staff.name} đã có nghỉ phép ngày ${date}.`;
-  const currentCount = leaveDays.filter(
-    (day) => day.date === date && day.staffType === staff.type
-  ).length;
-  return currentCount >= limitPerType
-    ? `Ngày ${date} đã đủ ${limitPerType} ${staff.type} nghỉ phép.`
-    : null;
+type ReportSignatureState = Pick<
+  WorkReport,
+  "signatureDieuPhoi" | "signatureDieuPhoiName" | "signatureDieuPhoiAt"
+>;
+
+export function hasCoordinatorSignature(report: ReportSignatureState | null | undefined): boolean {
+  if (!report) return false;
+  return Boolean(report.signatureDieuPhoi || report.signatureDieuPhoiName || report.signatureDieuPhoiAt);
 }
 
-export function leaveSummaryByType(leaveDays: LeaveDay[], date: string, type: StaffType): string {
-  return leaveDays
-    .filter((day) => day.date === date && day.staffType === type)
-    .map((day) => day.staffName)
-    .join(", ");
+/** Sau khi điều phối đã ký chốt thì chỉ admin còn sửa được số liệu. */
+export function canEditWorkReport(role: Role, report: ReportSignatureState | null | undefined): boolean {
+  if (role === "admin") return true;
+  if (!canManageSchedule(role)) return false;
+  return !hasCoordinatorSignature(report);
+}
+
+export function attendanceSummary(present: number, total: number): string {
+  if (total === 0) return "Chưa có phân công";
+  return `${present}/${total} khoa phòng có mặt`;
 }

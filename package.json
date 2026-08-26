@@ -1,5 +1,5 @@
 {
-  "name": "lich-truc-cdha",
+  "name": "lich-ksktd",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -10,8 +10,7 @@
     "test": "vitest run",
     "worker:dev": "wrangler dev --local --persist-to=.wrangler/state --port 8787",
     "worker:types": "wrangler types src/worker/env.d.ts",
-    "d1:local": "wrangler d1 migrations apply lich-truc-cdha --local",
-    "db:migrate:postgres": "node scripts/migrate-d1-to-postgres.mjs",
+    "db:create-admin": "node scripts/create-admin.mjs",
     "deploy:dry": "wrangler deploy --dry-run",
     "deploy": "wrangler deploy"
   },

@@ -14,8 +14,8 @@ import {
   WidthType
 } from "docx";
 import JSZip from "jszip";
-import { formatVietnamDateTime } from "../shared/schedule";
-import type { DutyReport } from "../shared/types";
+import { SESSION_LABELS, formatVietnamDateTime } from "../shared/schedule";
+import type { AttendanceEntry, WorkReport } from "../shared/types";
 
 const FONT = "Times New Roman";
 const BODY_SIZE = 24;
@@ -31,6 +31,15 @@ const TABLE_BORDERS = {
   right: NO_BORDER,
   insideHorizontal: NO_BORDER,
   insideVertical: NO_BORDER
+};
+const THIN_BORDER = { style: BorderStyle.SINGLE, size: 4, color: "94A3B8" };
+const GRID_BORDERS = {
+  top: THIN_BORDER,
+  bottom: THIN_BORDER,
+  left: THIN_BORDER,
+  right: THIN_BORDER,
+  insideHorizontal: THIN_BORDER,
+  insideVertical: THIN_BORDER
 };
 
 function run(text: string, options: { bold?: boolean; italics?: boolean; size?: number } = {}) {
@@ -67,10 +76,7 @@ function sectionHeading(text: string) {
 }
 
 function fieldLine(label: string, value: string | number, suffix = "") {
-  return paragraph([
-    run(label),
-    run(`${value}${suffix}`)
-  ]);
+  return paragraph([run(label), run(`${value}${suffix}`)]);
 }
 
 function displayDate(date: string) {
@@ -93,7 +99,7 @@ function signatureImage(dataUrl: string | null): ImageRun | null {
     const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
     return new ImageRun({
       data: bytes,
-      transformation: { width: 132, height: 64 },
+      transformation: { width: 120, height: 56 },
       type: match[1] === "jpeg" ? "jpg" : "png"
     });
   } catch {
@@ -101,48 +107,66 @@ function signatureImage(dataUrl: string | null): ImageRun | null {
   }
 }
 
-function signatureCell(
-  title: string,
-  signature: string | null,
-  signerName: string | null,
-  signedAt: string | null
-) {
-  const image = signatureImage(signature);
-  const children = [
-    paragraph([run(title, { bold: true })], { alignment: AlignmentType.CENTER, after: 80 }),
-    image
-      ? new Paragraph({
-          children: [image],
-          alignment: AlignmentType.CENTER,
-          spacing: { after: 40 }
-        })
-      : paragraph([run("Chưa ký", { italics: true })], {
-          alignment: AlignmentType.CENTER,
-          after: 80
-        }),
-    paragraph([run(valueOrFallback(signerName, ""), { bold: true })], {
-      alignment: AlignmentType.CENTER,
-      after: 20
-    })
-  ];
-
-  if (signedAt) {
-    children.push(
-      paragraph([run(`Đã ký: ${formatVietnamDateTime(signedAt)}`, { size: 18 })], {
-        alignment: AlignmentType.CENTER,
+function textCell(text: string, widthPercent: number, options: { bold?: boolean; center?: boolean } = {}) {
+  return new TableCell({
+    width: { size: widthPercent, type: WidthType.PERCENTAGE },
+    verticalAlign: VerticalAlign.CENTER,
+    children: [
+      paragraph([run(text, { bold: options.bold, size: 22 })], {
+        alignment: options.center ? AlignmentType.CENTER : undefined,
         after: 0
       })
-    );
-  }
-
-  return new TableCell({
-    width: { size: 33.33, type: WidthType.PERCENTAGE },
-    verticalAlign: VerticalAlign.TOP,
-    children
+    ]
   });
 }
 
-export function createDutyReportDocument(report: DutyReport): Document {
+/** Bảng điểm danh: khoa phòng, người làm việc, số điện thoại, có mặt, chữ ký. */
+function attendanceTable(attendance: AttendanceEntry[]): Table {
+  const headerRow = new TableRow({
+    tableHeader: true,
+    children: [
+      textCell("Khoa phòng", 26, { bold: true, center: true }),
+      textCell("Người làm việc", 24, { bold: true, center: true }),
+      textCell("Điện thoại", 16, { bold: true, center: true }),
+      textCell("Có mặt", 10, { bold: true, center: true }),
+      textCell("Chữ ký", 24, { bold: true, center: true })
+    ]
+  });
+
+  const rows = attendance.map((entry) => {
+    const image = signatureImage(entry.signature);
+    return new TableRow({
+      cantSplit: true,
+      children: [
+        textCell(entry.departmentName, 26),
+        textCell(valueOrFallback(entry.personName, "Chưa điền"), 24),
+        textCell(valueOrFallback(entry.personPhone, "—"), 16),
+        textCell(entry.present ? "x" : "", 10, { center: true }),
+        new TableCell({
+          width: { size: 24, type: WidthType.PERCENTAGE },
+          verticalAlign: VerticalAlign.CENTER,
+          children: image
+            ? [
+                new Paragraph({ children: [image], alignment: AlignmentType.CENTER, spacing: { after: 20 } }),
+                paragraph([run(valueOrFallback(entry.signatureName, ""), { size: 20 })], {
+                  alignment: AlignmentType.CENTER,
+                  after: 0
+                })
+              ]
+            : [paragraph([run("Chưa ký", { italics: true, size: 20 })], { alignment: AlignmentType.CENTER, after: 0 })]
+        })
+      ]
+    });
+  });
+
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    borders: GRID_BORDERS,
+    rows: [headerRow, ...rows]
+  });
+}
+
+export function createWorkReportDocument(report: WorkReport): Document {
   const headerTable = new Table({
     width: { size: 100, type: WidthType.PERCENTAGE },
     borders: TABLE_BORDERS,
@@ -152,11 +176,8 @@ export function createDutyReportDocument(report: DutyReport): Document {
           new TableCell({
             width: { size: 42, type: WidthType.PERCENTAGE },
             children: [
-              paragraph([run("BỆNH VIỆN THỐNG NHẤT", { bold: true })], {
-                alignment: AlignmentType.CENTER,
-                after: 20
-              }),
-              paragraph([run("KHOA CHẨN ĐOÁN HÌNH ẢNH", { bold: true, size: 22 })], {
+              paragraph([run("SỞ Y TẾ", { bold: true })], { alignment: AlignmentType.CENTER, after: 20 }),
+              paragraph([run("BAN CHỈ ĐẠO KHÁM SỨC KHỎE TOÀN DÂN", { bold: true, size: 22 })], {
                 alignment: AlignmentType.CENTER,
                 after: 0
               })
@@ -180,6 +201,7 @@ export function createDutyReportDocument(report: DutyReport): Document {
     ]
   });
 
+  const coordinatorSignature = signatureImage(report.signatureDieuPhoi);
   const signatures = new Table({
     width: { size: 100, type: WidthType.PERCENTAGE },
     borders: TABLE_BORDERS,
@@ -187,55 +209,64 @@ export function createDutyReportDocument(report: DutyReport): Document {
       new TableRow({
         cantSplit: true,
         children: [
-          signatureCell(
-            "LÃNH ĐẠO KHOA",
-            report.signatureLanhdao,
-            report.signatureLanhdaoName,
-            report.signatureLanhdaoAt
-          ),
-          signatureCell(
-            "BÁC SĨ TRỰC",
-            report.signatureBs,
-            report.signatureBsName,
-            report.signatureBsAt
-          ),
-          signatureCell(
-            "KTV TRỰC",
-            report.signatureKtv,
-            report.signatureKtvName,
-            report.signatureKtvAt
-          )
+          new TableCell({
+            width: { size: 55, type: WidthType.PERCENTAGE },
+            children: [paragraph("", { after: 0 })]
+          }),
+          new TableCell({
+            width: { size: 45, type: WidthType.PERCENTAGE },
+            verticalAlign: VerticalAlign.TOP,
+            children: [
+              paragraph([run("ĐIỀU PHỐI", { bold: true })], { alignment: AlignmentType.CENTER, after: 80 }),
+              coordinatorSignature
+                ? new Paragraph({
+                    children: [coordinatorSignature],
+                    alignment: AlignmentType.CENTER,
+                    spacing: { after: 40 }
+                  })
+                : paragraph([run("Chưa ký", { italics: true })], { alignment: AlignmentType.CENTER, after: 80 }),
+              paragraph([run(valueOrFallback(report.signatureDieuPhoiName, ""), { bold: true })], {
+                alignment: AlignmentType.CENTER,
+                after: 20
+              }),
+              ...(report.signatureDieuPhoiAt
+                ? [
+                    paragraph([run(`Đã ký: ${formatVietnamDateTime(report.signatureDieuPhoiAt)}`, { size: 18 })], {
+                      alignment: AlignmentType.CENTER,
+                      after: 0
+                    })
+                  ]
+                : [])
+            ]
+          })
         ]
       })
     ]
   });
 
+  const presentCount = report.attendance.filter((entry) => entry.present).length;
+
   return new Document({
-    creator: "Hệ thống Lịch trực CĐHA",
-    title: `Báo cáo trực ngày ${displayDate(report.date)}`,
-    description: "Báo cáo trực Khoa Chẩn đoán hình ảnh",
+    creator: "Hệ thống Lịch khám sức khỏe toàn dân",
+    title: `Báo cáo làm việc ngày ${displayDate(report.date)}`,
+    description: "Báo cáo làm việc buổi khám sức khỏe toàn dân",
     sections: [
       {
         properties: {
           page: {
-            size: {
-              width: 11906,
-              height: 16838,
-              orientation: PageOrientation.PORTRAIT
-            },
-            margin: {
-              top: 720,
-              right: 720,
-              bottom: 720,
-              left: 720
-            }
+            size: { width: 11906, height: 16838, orientation: PageOrientation.PORTRAIT },
+            margin: { top: 720, right: 720, bottom: 720, left: 720 }
           }
         },
         children: [
           headerTable,
-          paragraph([run("BÁO CÁO TRỰC", { bold: true, size: 32 })], {
+          paragraph([run("BÁO CÁO LÀM VIỆC", { bold: true, size: 32 })], {
             alignment: AlignmentType.CENTER,
             before: 240,
+            after: 60
+          }),
+          paragraph([run(`Buổi khám sức khỏe toàn dân ngày ${displayDate(report.date)}`, { bold: true, size: 26 })], {
+            alignment: AlignmentType.CENTER,
             after: 140
           }),
           paragraph([
@@ -243,32 +274,27 @@ export function createDutyReportDocument(report: DutyReport): Document {
             run(valueOrFallback(report.reportTime, "07:00"), { bold: true }),
             run(" ngày "),
             run(displayDate(report.reportDate), { bold: true }),
-            run(", tại Khoa Chẩn đoán hình ảnh. Sau khi kết thúc ca trực ngày "),
-            run(displayDate(report.date), { bold: true }),
-            run(", chúng tôi xin báo cáo:")
+            run(", sau khi kết thúc buổi làm việc "),
+            run(SESSION_LABELS[report.session].toLowerCase(), { bold: true }),
+            run(` ngày ${displayDate(report.date)}, chúng tôi xin báo cáo:`)
           ], { after: 100 }),
 
-          sectionHeading("I. Tình hình nhân sự:"),
-          fieldLine("1. BS trực: ", valueOrFallback(report.bsTruc, "Chưa ghi")),
-          fieldLine("2. KTV trực: ", valueOrFallback(report.ktvTruc, "Chưa ghi")),
+          sectionHeading("I. Điểm danh nhân sự tham gia:"),
+          attendanceTable(report.attendance),
+          paragraph([
+            run(`Tổng số khoa phòng tham gia: ${report.attendance.length}. Có mặt: ${presentCount}.`, { italics: true })
+          ], { before: 60 }),
 
-          sectionHeading("II. Tình hình chuyên môn:"),
-          fieldLine("- Số ca chụp X-quang tại khoa: ", report.xqKhoa, " ca"),
-          fieldLine("- Số ca chụp X-quang tại giường: ", report.xqGiuong, " ca"),
-          fieldLine("- Số ca chụp MRI: ", report.mri, " ca"),
-          fieldLine("- Số ca chụp CT Scan: ", report.ctScan, " ca"),
-          fieldLine("- Thuốc sử dụng: ", valueOrFallback(report.thuocSuDung)),
-          paragraph([run("- Các trường hợp bác sĩ đọc phim báo cáo ca khó cần lưu ý để hội chẩn:", { bold: true })], {
-            before: 40,
-            after: 40
-          }),
-          paragraph(valueOrFallback(report.caKho)),
+          sectionHeading("II. Số liệu công việc:"),
+          fieldLine("- Số lượt người được khám: ", report.soLuotKham, " lượt"),
+          fieldLine("- Số hồ sơ hoàn thành: ", report.soHoSo, " hồ sơ"),
+          fieldLine("- Vật tư, thuốc sử dụng: ", valueOrFallback(report.vatTu)),
 
-          sectionHeading("III. Tình hình dụng cụ và trang thiết bị:"),
-          paragraph(valueOrFallback(report.thietBi)),
+          sectionHeading("III. Sự cố, vấn đề phát sinh:"),
+          paragraph(valueOrFallback(report.suCo, "Không có")),
 
-          sectionHeading("IV. Tình hình an ninh trật tự:"),
-          paragraph(valueOrFallback(report.anNinh)),
+          sectionHeading("IV. Đề xuất, kiến nghị:"),
+          paragraph(valueOrFallback(report.deXuat, "Không có")),
 
           paragraph("", { before: 120, after: 40 }),
           signatures
@@ -278,15 +304,15 @@ export function createDutyReportDocument(report: DutyReport): Document {
   });
 }
 
-export async function createDutyReportsZip(reports: DutyReport[]): Promise<Blob> {
+export async function createWorkReportsZip(reports: WorkReport[]): Promise<Blob> {
   const zip = new JSZip();
   const orderedReports = [...reports].sort((a, b) => a.date.localeCompare(b.date));
 
   for (const report of orderedReports) {
-    const document = createDutyReportDocument(report);
+    const document = createWorkReportDocument(report);
     const documentBlob = await Packer.toBlob(document);
     zip.file(
-      `bao-cao-truc-${report.date}.docx`,
+      `bao-cao-lam-viec-${report.date}.docx`,
       new Uint8Array(await documentBlob.arrayBuffer()),
       { compression: "STORE" }
     );

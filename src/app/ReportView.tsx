@@ -1,16 +1,26 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { toBlob } from "html-to-image";
-import { api } from "./api";
 import {
-  getReportExportPeriod,
-  isDateInReportPeriod,
-  type ReportExportRange
-} from "./reportExportPeriod";
+  Calendar,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  CircleAlert,
+  FileArchive,
+  ImageDown,
+  LoaderCircle,
+  LockKeyhole,
+  Printer,
+  Save,
+  Trash2
+} from "lucide-react";
+import { api } from "./api";
+import { getReportExportPeriod, isDateInReportPeriod, type ReportExportRange } from "./reportExportPeriod";
 import { SignaturePad } from "./SignaturePad";
-import type { User, DutyReport, DutyReportSummary } from "../shared/types";
-import { Calendar, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, FileArchive, ImageDown, LoaderCircle, LockKeyhole, Plus, Printer, Save, Trash2 } from "lucide-react";
-import { addDays, formatVietnamDateTime, todayInVietnam } from "../shared/schedule";
-import { canEditDutyReport, hasReportSignature } from "../shared/validation";
+import { downloadBlob } from "./scheduleExport";
+import type { AttendanceEntry, CoordinatorAssignment, User, WorkDay, WorkReport, WorkReportSummary } from "../shared/types";
+import { SESSION_LABELS, formatFullDate, formatVietnamDateTime, todayInVietnam } from "../shared/schedule";
+import { attendanceSummary, canEditWorkReport, canManageSchedule, hasCoordinatorSignature } from "../shared/validation";
 
 interface ReportViewProps {
   user: User;
@@ -19,122 +29,107 @@ interface ReportViewProps {
 }
 
 export function ReportView({ user, notify, navigationTarget }: ReportViewProps) {
-  const [selectedDate, setSelectedDate] = useState(() => navigationTarget?.date || addDays(todayInVietnam(), -1));
-  
-  const [reportsList, setReportsList] = useState<DutyReportSummary[]>([]);
+  const [reportsList, setReportsList] = useState<WorkReportSummary[]>([]);
+  const [selectedDate, setSelectedDate] = useState(() => navigationTarget?.date || todayInVietnam());
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [currentReport, setCurrentReport] = useState<WorkReport | null>(null);
+  const [workDay, setWorkDay] = useState<WorkDay | null>(null);
+  const [attendance, setAttendance] = useState<AttendanceEntry[]>([]);
+  const [dayCoordinators, setDayCoordinators] = useState<CoordinatorAssignment[]>([]);
+  const [canSign, setCanSign] = useState(false);
+
+  const [reportDate, setReportDate] = useState("");
+  const [reportTime, setReportTime] = useState("07:00");
+  const [soLuotKham, setSoLuotKham] = useState(0);
+  const [soHoSo, setSoHoSo] = useState(0);
+  const [vatTu, setVatTu] = useState("");
+  const [suCo, setSuCo] = useState("");
+  const [deXuat, setDeXuat] = useState("");
+
   const [exportingImage, setExportingImage] = useState(false);
   const [capturingImageLayout, setCapturingImageLayout] = useState(false);
   const [bulkExporting, setBulkExporting] = useState<ReportExportRange | null>(null);
   const [openExportMenu, setOpenExportMenu] = useState<"desktop" | "mobile" | null>(null);
-  const [scheduledBs, setScheduledBs] = useState<string[]>([]);
-  const [scheduledKtv, setScheduledKtv] = useState<string[]>([]);
-  
-  // Form states
-  const [reportDate, setReportDate] = useState("");
-  const [reportTime, setReportTime] = useState("07:00");
-  const [bsTruc, setBsTruc] = useState("");
-  const [ktvTruc, setKtvTruc] = useState("");
-  const [xqKhoa, setXqKhoa] = useState(0);
-  const [xqGiuong, setXqGiuong] = useState(0);
-  const [mri, setMri] = useState(0);
-  const [ctScan, setCtScan] = useState(0);
-  const [thuocSuDung, setThuocSuDung] = useState("");
-  const [caKho, setCaKho] = useState("");
-  const [thietBi, setThietBi] = useState("Tốt");
-  const [anNinh, setAnNinh] = useState("Tốt");
-  
-  // Signature and report details from server
-  const [currentReport, setCurrentReport] = useState<DutyReport | null>(null);
-  const reportRequestSequence = useRef(0);
+
+  const requestSequence = useRef(0);
   const reportPaperRef = useRef<HTMLFormElement>(null);
 
   const isAdmin = user.role === "admin";
-  const isDoctor = user.role === "bs" || isAdmin;
-  const isTechnician = user.role === "ktv" || isAdmin;
-  const reportSigned = hasReportSignature(currentReport);
-  const reportLocked = !canEditDutyReport(user.role, currentReport);
-  const pendingSignatureLabel = currentReport
-    ? user.role === "bs" && !currentReport.signatureBs
-      ? "Bác sĩ trực"
-      : user.role === "ktv" && !currentReport.signatureKtv
-        ? "KTV trực"
-        : isAdmin && !currentReport.signatureLanhdao
-          ? "Lãnh đạo khoa"
-          : null
-    : null;
+  const isScheduler = canManageSchedule(user.role);
+  const reportLocked = !canEditWorkReport(user.role, currentReport);
+  const coordinatorSigned = hasCoordinatorSignature(currentReport);
+  const myEntry = attendance.find((entry) => entry.departmentId === user.departmentId);
 
-  // Load reports list
-  const loadReportsList = async () => {
+  async function loadReportsList() {
     try {
       const res = await api.listReports();
       setReportsList(res.reports || []);
-    } catch (e) {
-      console.error(e);
+    } catch (error) {
+      console.error(error);
     }
-  };
+  }
 
-  useEffect(() => {
-    loadReportsList();
-  }, []);
-
-  // Load report for selected date
-  const loadReportForDate = async (dateStr: string) => {
-    const requestSequence = ++reportRequestSequence.current;
+  async function loadReportForDate(dateStr: string) {
+    const sequence = ++requestSequence.current;
     setLoading(true);
+    setLoadError("");
     try {
       const res = await api.getReport(dateStr);
-      if (requestSequence !== reportRequestSequence.current) return;
-      setScheduledBs(res.scheduledBs || []);
-      setScheduledKtv(res.scheduledKtv || []);
-      
+      if (sequence !== requestSequence.current) return;
+      setWorkDay(res.workDay);
+      setAttendance(res.attendance || []);
+      setDayCoordinators(res.coordinators || []);
+      setCanSign(res.canSign);
+
       if (res.report) {
         setCurrentReport(res.report);
         setReportDate(res.report.reportDate);
         setReportTime(res.report.reportTime);
-        setBsTruc(res.report.bsTruc || "");
-        setKtvTruc(res.report.ktvTruc || "");
-        setXqKhoa(res.report.xqKhoa || 0);
-        setXqGiuong(res.report.xqGiuong || 0);
-        setMri(res.report.mri || 0);
-        setCtScan(res.report.ctScan || 0);
-        setThuocSuDung(res.report.thuocSuDung || "");
-        setCaKho(res.report.caKho || "");
-        setThietBi(res.report.thietBi || "");
-        setAnNinh(res.report.anNinh || "");
+        setSoLuotKham(res.report.soLuotKham || 0);
+        setSoHoSo(res.report.soHoSo || 0);
+        setVatTu(res.report.vatTu || "");
+        setSuCo(res.report.suCo || "");
+        setDeXuat(res.report.deXuat || "");
       } else {
-        // Pre-fill for new report
         setCurrentReport(null);
-        setReportDate(addDays(dateStr, 1));
+        setReportDate(dateStr);
         setReportTime("07:00");
-        setBsTruc(res.scheduledBs.join(", "));
-        setKtvTruc(res.scheduledKtv.join(", "));
-        setXqKhoa(0);
-        setXqGiuong(0);
-        setMri(0);
-        setCtScan(0);
-        setThuocSuDung("");
-        setCaKho("");
-        setThietBi("Tốt");
-        setAnNinh("Tốt");
+        setSoLuotKham(0);
+        setSoHoSo(0);
+        setVatTu("");
+        setSuCo("");
+        setDeXuat("");
       }
-    } catch (e) {
-      if (requestSequence === reportRequestSequence.current) {
-        notify(e instanceof Error ? e.message : "Không thể tải báo cáo");
+    } catch (error) {
+      if (sequence === requestSequence.current) {
+        setCurrentReport(null);
+        setWorkDay(null);
+        setAttendance([]);
+        setDayCoordinators([]);
+        setLoadError(error instanceof Error ? error.message : "Không thể tải báo cáo");
       }
     } finally {
-      if (requestSequence === reportRequestSequence.current) setLoading(false);
+      if (sequence === requestSequence.current) setLoading(false);
     }
-  };
+  }
 
   useEffect(() => {
-    loadReportForDate(selectedDate);
+    void loadReportsList();
+  }, []);
+
+  useEffect(() => {
+    void loadReportForDate(selectedDate);
   }, [selectedDate]);
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
+  async function refreshCurrent() {
+    await Promise.all([loadReportForDate(selectedDate), loadReportsList()]);
+  }
+
+  const handleSave = async (event: React.FormEvent) => {
+    event.preventDefault();
     if (reportLocked) {
-      notify("Báo cáo đã có chữ ký nên không thể chỉnh sửa. Admin cần xóa và tạo lại nếu cần điều chỉnh.");
+      notify("Báo cáo đã được ký chốt nên chỉ quản lý mới sửa được số liệu.");
       return;
     }
     try {
@@ -142,45 +137,48 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
         date: selectedDate,
         reportDate,
         reportTime,
-        bsTruc,
-        ktvTruc,
-        xqKhoa,
-        xqGiuong,
-        mri,
-        ctScan,
-        thuocSuDung,
-        caKho,
-        thietBi,
-        anNinh
+        soLuotKham,
+        soHoSo,
+        vatTu,
+        suCo,
+        deXuat
       });
-      notify("Đã lưu báo cáo trực. Vui lòng ký tên ở phần bên dưới để hoàn tất.");
-      await loadReportForDate(selectedDate);
-      await loadReportsList();
-    } catch (e) {
-      notify(e instanceof Error ? e.message : "Có lỗi xảy ra khi lưu");
+      notify("Đã lưu báo cáo làm việc. Các khoa phòng có thể điểm danh và ký tên.");
+      await refreshCurrent();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Có lỗi xảy ra khi lưu");
     }
   };
 
   const handleDelete = async () => {
-    if (!window.confirm(`Bạn có chắc chắn muốn xóa báo cáo trực ngày ${formatDisplayDate(selectedDate)}?`)) {
-      return;
-    }
+    if (!window.confirm(`Xóa báo cáo làm việc ngày ${formatFullDate(selectedDate)}?`)) return;
     try {
       await api.deleteReport(selectedDate);
-      notify("Đã xóa báo cáo trực thành công!");
-      await loadReportForDate(selectedDate);
-      await loadReportsList();
-    } catch (e) {
-      notify(e instanceof Error ? e.message : "Có lỗi xảy ra khi xóa báo cáo");
+      notify("Đã xóa báo cáo làm việc.");
+      await refreshCurrent();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Có lỗi xảy ra khi xóa báo cáo");
     }
   };
 
-  const handleSign = async (
-    role: "bs" | "ktv" | "lanhdao",
-    signerName: string,
-    signature?: string,
-    useStoredSignature = false
-  ) => {
+  const handleAttendance = async (payload: {
+    departmentId: number;
+    present?: boolean;
+    note?: string;
+    signature?: string;
+    signerName?: string;
+    useStoredSignature?: boolean;
+  }) => {
+    try {
+      await api.saveAttendance({ date: selectedDate, ...payload });
+      notify(payload.signature || payload.useStoredSignature ? "Đã ký tên báo cáo làm việc." : "Đã cập nhật điểm danh.");
+      await refreshCurrent();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Không lưu được điểm danh.");
+    }
+  };
+
+  const handleCoordinatorSign = async (signerName: string, signature?: string, useStoredSignature = false) => {
     if (!currentReport) {
       notify("Hãy lưu báo cáo trước khi ký.");
       return;
@@ -188,64 +186,35 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
     try {
       await api.signReport({
         date: selectedDate,
-        role,
+        role: "dieu_phoi",
         signature,
         signerName,
         useStoredSignature
       });
-      notify(`Đã ký tên vai trò ${role === "bs" ? "Bác sĩ trực" : role === "ktv" ? "KTV trực" : "Lãnh đạo khoa"} thành công!`);
-      await loadReportForDate(selectedDate);
-      await loadReportsList();
-    } catch (e) {
-      notify(e instanceof Error ? e.message : "Ký tên thất bại");
+      notify("Đã ký chốt báo cáo làm việc.");
+      await refreshCurrent();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Ký tên thất bại");
     }
   };
 
-  const navigateDate = (offset: number) => {
-    setSelectedDate(addDays(selectedDate, offset));
-  };
-
-  const formatDisplayDate = (dateStr: string) => {
-    if (!dateStr) return "";
-    const parts = dateStr.split("-");
-    if (parts.length !== 3) return dateStr;
-    return `${parts[2]}/${parts[1]}/${parts[0]}`;
-  };
-
-  const printReport = () => {
-    window.print();
-  };
-
-  const downloadBlob = (blob: Blob, filename: string) => {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.download = filename;
-    link.href = url;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  };
-
   const exportReportsAsWordZip = async (range: ReportExportRange) => {
-    if (!isAdmin || bulkExporting) return;
-
+    if (!isScheduler || bulkExporting) return;
     setOpenExportMenu(null);
     setBulkExporting(range);
-
     try {
       const period = getReportExportPeriod(todayInVietnam(), range);
       const latestList = await api.listReports();
       const summaries = (latestList.reports || [])
-        .filter((report) => isDateInReportPeriod(report.date, period))
-        .sort((a, b) => a.date.localeCompare(b.date));
+        .filter((report) => report.report_time && isDateInReportPeriod(report.date, period))
+        .sort((left, right) => left.date.localeCompare(right.date));
 
       if (summaries.length === 0) {
-        notify(`Không có báo cáo trực trong ${period.label}.`);
+        notify(`Không có báo cáo làm việc trong ${period.label}.`);
         return;
       }
 
-      const reports: DutyReport[] = [];
+      const reports: WorkReport[] = [];
       const batchSize = 4;
       for (let index = 0; index < summaries.length; index += batchSize) {
         const batch = summaries.slice(index, index + batchSize);
@@ -256,13 +225,12 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
       }
 
       if (reports.length === 0) {
-        notify(`Không có báo cáo trực trong ${period.label}.`);
+        notify(`Không có báo cáo làm việc trong ${period.label}.`);
         return;
       }
 
-      const { createDutyReportsZip } = await import("./reportWordExport");
-      const zipBlob = await createDutyReportsZip(reports);
-      downloadBlob(zipBlob, period.filename);
+      const { createWorkReportsZip } = await import("./reportWordExport");
+      downloadBlob(await createWorkReportsZip(reports), period.filename);
       notify(`Đã xuất ${reports.length} file Word trong ZIP (${period.label}).`);
     } catch (error) {
       console.error(error);
@@ -297,7 +265,6 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
       await new Promise<void>((resolve) => {
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
       });
-
       placeholderFields.forEach(({ field }) => field.removeAttribute("placeholder"));
       placeholdersHidden = true;
 
@@ -310,7 +277,7 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
       restorePlaceholders();
       setCapturingImageLayout(false);
 
-      const filename = `bao-cao-truc-${selectedDate}.png`;
+      const filename = `bao-cao-lam-viec-${selectedDate}.png`;
       const file = new File([blob], filename, { type: "image/png" });
       const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
         || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
@@ -319,8 +286,8 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
         try {
           await navigator.share({
             files: [file],
-            title: "Báo cáo trực",
-            text: `Báo cáo trực ngày ${formatDisplayDate(selectedDate)}`
+            title: "Báo cáo làm việc",
+            text: `Báo cáo làm việc ngày ${formatFullDate(selectedDate)}`
           });
           return;
         } catch (error) {
@@ -350,56 +317,38 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
     }
   };
 
-  const renderReportSidebar = (placement: "desktop" | "mobile") => (
+  const renderSidebar = (placement: "desktop" | "mobile") => (
     <aside className={`report-sidebar report-sidebar-${placement}`}>
       <div className="sidebar-header">
-        <h3>Báo cáo trực gần đây</h3>
-        {isAdmin ? (
+        <h3>Ngày làm việc gần đây</h3>
+        {isScheduler && (
           <div
             className="report-export-dropdown"
             onBlur={(event) => {
-              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                setOpenExportMenu(null);
-              }
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                setOpenExportMenu(null);
-                event.currentTarget.querySelector<HTMLButtonElement>(".report-export-trigger")?.focus();
-              }
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpenExportMenu(null);
             }}
           >
             <button
               type="button"
               className="primary-btn mini-btn report-export-trigger"
               onClick={() => {
-                if (!bulkExporting) {
-                  setOpenExportMenu((current) => current === placement ? null : placement);
-                }
+                if (!bulkExporting) setOpenExportMenu((current) => (current === placement ? null : placement));
               }}
               disabled={bulkExporting !== null}
               aria-haspopup="menu"
               aria-expanded={openExportMenu === placement}
-              aria-controls={`report-export-menu-${placement}`}
               title="Xuất nhiều báo cáo thành file ZIP"
             >
-              {bulkExporting
-                ? <LoaderCircle className="report-image-spinner" size={16} aria-hidden="true" />
-                : <FileArchive size={16} aria-hidden="true" />}
+              {bulkExporting ? (
+                <LoaderCircle className="report-image-spinner" size={16} aria-hidden="true" />
+              ) : (
+                <FileArchive size={16} aria-hidden="true" />
+              )}
               <span>{bulkExporting ? "Đang xuất" : "Xuất Word"}</span>
-              <ChevronDown
-                className={openExportMenu === placement ? "report-export-chevron open" : "report-export-chevron"}
-                size={14}
-                aria-hidden="true"
-              />
+              <ChevronDown size={14} aria-hidden="true" />
             </button>
             {openExportMenu === placement && (
-              <div
-                id={`report-export-menu-${placement}`}
-                className="report-export-menu"
-                role="menu"
-                aria-label="Chọn khoảng thời gian xuất báo cáo"
-              >
+              <div className="report-export-menu" role="menu">
                 <button type="button" role="menuitem" onClick={() => void exportReportsAsWordZip("last15")}>
                   15 ngày gần nhất
                 </button>
@@ -409,34 +358,25 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
               </div>
             )}
           </div>
-        ) : (
-          <button
-            type="button"
-            className="primary-btn mini-btn"
-            onClick={() => {
-              setSelectedDate(todayInVietnam());
-            }}
-            title="Tạo báo cáo ngày hôm nay"
-          >
-            <Plus size={16} /> Hôm nay
-          </button>
         )}
       </div>
       <div className="report-dates-list">
         {reportsList.length === 0 ? (
-          <div className="empty-list-text">Chưa có báo cáo nào được ghi nhận.</div>
+          <div className="empty-list-text">Chưa có ngày làm việc nào.</div>
         ) : (
-          reportsList.map((rep) => (
+          reportsList.map((item) => (
             <button
-              key={rep.date}
+              key={item.date}
               type="button"
-              className={`report-date-item-btn ${selectedDate === rep.date ? "active" : ""}`}
-              onClick={() => setSelectedDate(rep.date)}
+              className={`report-date-item-btn ${selectedDate === item.date ? "active" : ""}`}
+              onClick={() => setSelectedDate(item.date)}
             >
-              <div className="date-item-title">Ca trực: {formatDisplayDate(rep.date)}</div>
+              <div className="date-item-title">
+                {formatFullDate(item.date)} · {SESSION_LABELS[item.session]}
+              </div>
               <div className="date-item-staff">
-                <span>BS: {rep.bs_truc || "Chưa ghi"}</span>
-                <span>KTV: {rep.ktv_truc || "Chưa ghi"}</span>
+                <span>{attendanceSummary(Number(item.present_count || 0), Number(item.total_count || 0))}</span>
+                <span>{item.report_time ? "Đã có báo cáo" : "Chưa có báo cáo"}</span>
               </div>
             </button>
           ))
@@ -447,13 +387,17 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
 
   return (
     <main className="report-main-grid">
-      {renderReportSidebar("desktop")}
+      {renderSidebar("desktop")}
 
-      {/* Main content: Form báo cáo & Báo cáo giấy */}
       <div className="report-content-panel">
         <div className="report-toolbar">
           <div className="report-date-picker-nav">
-            <button type="button" className="icon-btn" onClick={() => navigateDate(-1)} title="Ngày trước">
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => shiftToNeighbourDay(-1)}
+              title="Ngày làm trước"
+            >
               <ChevronLeft size={18} />
             </button>
             <div className="report-date-selector">
@@ -461,11 +405,11 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
               <input
                 type="date"
                 value={selectedDate}
-                onChange={(e) => setSelectedDate(e.target.value)}
+                onChange={(event) => setSelectedDate(event.target.value)}
                 className="report-date-input"
               />
             </div>
-            <button type="button" className="icon-btn" onClick={() => navigateDate(1)} title="Ngày sau">
+            <button type="button" className="icon-btn" onClick={() => shiftToNeighbourDay(1)} title="Ngày làm sau">
               <ChevronRight size={18} />
             </button>
           </div>
@@ -481,7 +425,6 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
               className="tool-btn report-image-button"
               onClick={() => void exportReportImage()}
               disabled={!currentReport || exportingImage}
-              aria-label={exportingImage ? "Đang xuất ảnh báo cáo" : "Xuất ảnh báo cáo"}
               title="Xuất ảnh báo cáo"
             >
               {exportingImage ? <LoaderCircle className="report-image-spinner" size={16} /> : <ImageDown size={16} />}
@@ -490,9 +433,8 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
             <button
               type="button"
               className="tool-btn report-print-button"
-              onClick={printReport}
+              onClick={() => window.print()}
               disabled={!currentReport}
-              aria-label="In báo cáo"
               title="In báo cáo"
             >
               <Printer size={16} /> <span className="report-print-label">In báo cáo</span>
@@ -502,19 +444,21 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
 
         {loading ? (
           <div className="report-loading-container">Đang tải dữ liệu báo cáo...</div>
+        ) : loadError ? (
+          <div className="report-loading-container">{loadError}</div>
         ) : (
           <div className="report-layout-wrapper">
-            {/* Form edit fields */}
             <form
               ref={reportPaperRef}
-              className={`report-paper-form${capturingImageLayout ? " report-exporting-image" : ""}${reportLocked ? " report-locked" : ""}`}
+              className={`report-paper-form${capturingImageLayout ? " report-exporting-image" : ""}${
+                reportLocked ? " report-locked" : ""
+              }`}
               onSubmit={handleSave}
             >
-              {/* Header của báo cáo giấy */}
               <div className="paper-header">
                 <div className="paper-header-left">
-                  <h4>BỆNH VIỆN THỐNG NHẤT</h4>
-                  <h5>KHOA CHẨN ĐOÁN HÌNH ẢNH</h5>
+                  <h4>SỞ Y TẾ</h4>
+                  <h5>BAN CHỈ ĐẠO KHÁM SỨC KHỎE TOÀN DÂN</h5>
                 </div>
                 <div className="paper-header-right">
                   <h4>CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</h4>
@@ -523,292 +467,251 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
               </div>
 
               <div className="paper-title-area">
-                <h2>BÁO CÁO TRỰC</h2>
+                <h2>BÁO CÁO LÀM VIỆC</h2>
                 <div className="report-time-input-row">
                   Hôm nay, vào lúc{" "}
                   <input
                     type="text"
                     value={reportTime}
-                    onChange={(e) => setReportTime(e.target.value)}
-                    readOnly={reportLocked}
+                    onChange={(event) => setReportTime(event.target.value)}
+                    readOnly={reportLocked || !isScheduler}
                     placeholder="7 giờ 00"
                     className="paper-inline-input time-hour no-print"
                     style={{ width: "90px" }}
                     required
                   />
-                  <span className="print-only underline-date">{reportTime}</span>{" "}
-                  ngày{" "}
+                  <span className="print-only underline-date">{reportTime}</span> ngày{" "}
                   <input
                     type="date"
                     value={reportDate}
-                    onChange={(e) => setReportDate(e.target.value)}
-                    readOnly={reportLocked}
+                    onChange={(event) => setReportDate(event.target.value)}
+                    readOnly={reportLocked || !isScheduler}
                     className="paper-date-input-inline no-print"
                     required
                   />
-                  <span className="print-only underline-date">{formatDisplayDate(reportDate)}</span>
-                  , tại Khoa Chẩn đoán hình ảnh. Sau khi kết thúc ca trực ngày{" "}
-                  <span className="underline-date">{formatDisplayDate(selectedDate)}</span>
+                  <span className="print-only underline-date">{formatFullDate(reportDate)}</span>, sau khi kết thúc buổi
+                  làm việc{" "}
+                  <span className="underline-date">
+                    {workDay ? SESSION_LABELS[workDay.session].toLowerCase() : ""} ngày {formatFullDate(selectedDate)}
+                  </span>
                   , chúng tôi xin báo cáo:
                 </div>
+                {workDay?.note && <p className="paper-note">Địa điểm / ghi chú: {workDay.note}</p>}
               </div>
 
-              {/* Phần I: Nhân sự */}
               <div className="paper-section">
-                <h3>I. Tình hình nhân sự:</h3>
-                <div className="paper-field-row staff-field-row">
-                  <label>1. BS trực:</label>
-                  <input
-                    type="text"
-                    value={bsTruc}
-                    onChange={(e) => setBsTruc(e.target.value)}
-                    readOnly={reportLocked}
-                    placeholder="Điền tên bác sĩ trực"
-                    className="paper-underline-input"
-                  />
-                  {scheduledBs.length > 0 && (
-                    <span className="suggested-staff-hint">
-                      (Lịch: {scheduledBs.join(", ")})
-                    </span>
-                  )}
-                </div>
-                <div className="paper-field-row staff-field-row">
-                  <label>2. KTV trực:</label>
-                  <input
-                    type="text"
-                    value={ktvTruc}
-                    onChange={(e) => setKtvTruc(e.target.value)}
-                    readOnly={reportLocked}
-                    placeholder="Điền tên kỹ thuật viên trực"
-                    className="paper-underline-input"
-                  />
-                  {scheduledKtv.length > 0 && (
-                    <span className="suggested-staff-hint">
-                      (Lịch: {scheduledKtv.join(", ")})
-                    </span>
-                  )}
-                </div>
+                <h3>I. Điểm danh nhân sự tham gia:</h3>
+                {attendance.length === 0 ? (
+                  <span className="empty-note">Ngày này chưa có khoa phòng nào được phân công.</span>
+                ) : (
+                  <div className="attendance-table" role="table">
+                    <div className="attendance-head" role="row">
+                      <span role="columnheader">Khoa phòng</span>
+                      <span role="columnheader">Người làm việc</span>
+                      <span role="columnheader">Điện thoại</span>
+                      <span role="columnheader">Có mặt</span>
+                      <span role="columnheader">Chữ ký</span>
+                    </div>
+                    {attendance.map((entry) => {
+                      const isMine = entry.departmentId === user.departmentId;
+                      const canMarkPresent = isScheduler || (isMine && canSign);
+                      return (
+                        <div className="attendance-row" role="row" key={entry.departmentId}>
+                          <strong>{entry.departmentName}</strong>
+                          <span>{entry.personName || "Chưa điền tên"}</span>
+                          <span>{entry.personPhone || "—"}</span>
+                          <span className="attendance-present">
+                            {canMarkPresent && currentReport ? (
+                              <input
+                                type="checkbox"
+                                checked={entry.present}
+                                aria-label={`Điểm danh ${entry.departmentName}`}
+                                onChange={(event) =>
+                                  void handleAttendance({
+                                    departmentId: entry.departmentId,
+                                    present: event.target.checked
+                                  })
+                                }
+                              />
+                            ) : (
+                              <span className={entry.present ? "status-ok" : "status-off"}>
+                                {entry.present ? "Có mặt" : "Chưa"}
+                              </span>
+                            )}
+                          </span>
+                          <div className="attendance-signature">
+                            {entry.signature ? (
+                              <div className="saved-signature-display">
+                                <img src={entry.signature} alt={`Chữ ký ${entry.departmentName}`} />
+                                <div className="signature-signer-name">{entry.signatureName}</div>
+                                <div className="signature-time no-print">
+                                  Đã ký: {formatVietnamDateTime(entry.signatureAt)}
+                                </div>
+                              </div>
+                            ) : isMine && canSign && currentReport ? (
+                              <SignaturePad
+                                label={`Ký tên ${entry.departmentName}`}
+                                defaultName={user.fullName || entry.personName || ""}
+                                storedSignature={user.signature}
+                                onQuickSave={(name) =>
+                                  void handleAttendance({
+                                    departmentId: entry.departmentId,
+                                    present: true,
+                                    signerName: name,
+                                    useStoredSignature: true
+                                  })
+                                }
+                                onSave={(sig, name) =>
+                                  void handleAttendance({
+                                    departmentId: entry.departmentId,
+                                    present: true,
+                                    signerName: name,
+                                    signature: sig
+                                  })
+                                }
+                              />
+                            ) : (
+                              <p className="no-sig-text">Chưa ký</p>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
-              {/* Phần II: Chuyên môn */}
               <div className="paper-section">
-                <h3>II. Tình hình chuyên môn:</h3>
+                <h3>II. Số liệu công việc:</h3>
                 <div className="paper-numeric-grid">
                   <div className="numeric-field-row">
-                    <span>- Số ca chụp X-quang tại khoa:</span>
+                    <span>- Số lượt người được khám:</span>
                     <input
                       type="number"
-                      value={xqKhoa}
-                      onChange={(e) => setXqKhoa(Number(e.target.value))}
-                      readOnly={reportLocked}
+                      min={0}
+                      value={soLuotKham}
+                      onChange={(event) => setSoLuotKham(Number(event.target.value))}
+                      readOnly={reportLocked || !isScheduler}
                       className="paper-underline-input numeric-input"
                     />
-                    <span>ca</span>
+                    <span>lượt</span>
                   </div>
                   <div className="numeric-field-row">
-                    <span>- Số ca chụp X-quang tại giường:</span>
+                    <span>- Số hồ sơ hoàn thành:</span>
                     <input
                       type="number"
-                      value={xqGiuong}
-                      onChange={(e) => setXqGiuong(Number(e.target.value))}
-                      readOnly={reportLocked}
+                      min={0}
+                      value={soHoSo}
+                      onChange={(event) => setSoHoSo(Number(event.target.value))}
+                      readOnly={reportLocked || !isScheduler}
                       className="paper-underline-input numeric-input"
                     />
-                    <span>ca</span>
-                  </div>
-                  <div className="numeric-field-row">
-                    <span>- Số ca chụp MRI:</span>
-                    <input
-                      type="number"
-                      value={mri}
-                      onChange={(e) => setMri(Number(e.target.value))}
-                      readOnly={reportLocked}
-                      className="paper-underline-input numeric-input"
-                    />
-                    <span>ca</span>
-                  </div>
-                  <div className="numeric-field-row">
-                    <span>- Số ca chụp CT Scan:</span>
-                    <input
-                      type="number"
-                      value={ctScan}
-                      onChange={(e) => setCtScan(Number(e.target.value))}
-                      readOnly={reportLocked}
-                      className="paper-underline-input numeric-input"
-                    />
-                    <span>ca</span>
+                    <span>hồ sơ</span>
                   </div>
                 </div>
-
                 <div className="paper-field-block">
-                  <label>- Thuốc sử dụng:</label>
+                  <label>- Vật tư, thuốc sử dụng:</label>
                   <input
                     type="text"
-                    value={thuocSuDung}
-                    onChange={(e) => setThuocSuDung(e.target.value)}
-                    readOnly={reportLocked}
-                    placeholder="Ví dụ: 17 lọ Omni"
+                    value={vatTu}
+                    onChange={(event) => setVatTu(event.target.value)}
+                    readOnly={reportLocked || !isScheduler}
+                    placeholder="Ví dụ: 120 bộ test đường huyết"
                     className="paper-underline-input full-width"
                   />
                 </div>
-
-                <div className="paper-field-block">
-                  <label>- Các trường hợp bác sĩ đọc phim báo cáo ca khó cần lưu ý để hội chẩn:</label>
-                  <textarea
-                    rows={4}
-                    value={caKho}
-                    onChange={(e) => setCaKho(e.target.value)}
-                    readOnly={reportLocked}
-                    placeholder="Mô tả chi tiết ca khó cần lưu ý hội chẩn..."
-                    className="paper-textarea-input"
-                  />
-                </div>
               </div>
 
-              {/* Phần III: Dụng cụ và trang thiết bị */}
               <div className="paper-section">
-                <h3>III. Tình hình dụng cụ và trang thiết bị:</h3>
-                <input
-                  type="text"
-                  value={thietBi}
-                  onChange={(e) => setThietBi(e.target.value)}
-                  readOnly={reportLocked}
-                  placeholder="Ví dụ: Đủ, ổn định"
-                  className="paper-underline-input full-width"
+                <h3>III. Sự cố, vấn đề phát sinh:</h3>
+                <textarea
+                  rows={3}
+                  value={suCo}
+                  onChange={(event) => setSuCo(event.target.value)}
+                  readOnly={reportLocked || !isScheduler}
+                  placeholder="Không có"
+                  className="paper-textarea-input"
                 />
               </div>
 
-              {/* Phần IV: An ninh trật tự */}
               <div className="paper-section">
-                <h3>IV. Tình hình an ninh trật tự:</h3>
-                <input
-                  type="text"
-                  value={anNinh}
-                  onChange={(e) => setAnNinh(e.target.value)}
-                  readOnly={reportLocked}
-                  placeholder="Ví dụ: Tốt, ổn định"
-                  className="paper-underline-input full-width"
+                <h3>IV. Đề xuất, kiến nghị:</h3>
+                <textarea
+                  rows={3}
+                  value={deXuat}
+                  onChange={(event) => setDeXuat(event.target.value)}
+                  readOnly={reportLocked || !isScheduler}
+                  placeholder="Không có"
+                  className="paper-textarea-input"
                 />
               </div>
 
-              {/* Save Button for Report Details */}
-              {reportSigned && (
-                <div className="report-admin-edit-notice no-print" role="status">
-                  <LockKeyhole size={20} aria-hidden="true" />
-                  <span>Báo cáo đã có chữ ký. Bạn vẫn có thể chỉnh sửa và lưu lại nội dung; các chữ ký hiện tại được giữ nguyên.</span>
-                </div>
-              )}
               {reportLocked && (
-                <div className="report-lock-notice no-print" role="status" aria-live="polite">
+                <div className="report-lock-notice no-print" role="status">
                   <LockKeyhole size={20} aria-hidden="true" />
-                  <span>
-                    Báo cáo đã có chữ ký nên nội dung đã được khóa. Admin cần xóa báo cáo và tạo lại nếu muốn điều chỉnh.
-                  </span>
+                  <span>Báo cáo đã được điều phối ký chốt. Chỉ tài khoản quản lý còn sửa được số liệu.</span>
                 </div>
               )}
-              <div className="report-save-bar">
-                <button
-                  type="submit"
-                  className="primary-btn"
-                  disabled={reportLocked}
-                  title={reportLocked ? "Báo cáo đã có chữ ký, không thể chỉnh sửa" : undefined}
-                >
-                  <Save size={16} /> Lưu thông tin báo cáo
-                </button>
-              </div>
 
-              {pendingSignatureLabel && (
-                <div className="signature-reminder no-print" role="status" aria-live="polite">
+              {isScheduler && (
+                <div className="report-save-bar">
+                  <button type="submit" className="primary-btn" disabled={reportLocked}>
+                    <Save size={16} /> {currentReport ? "Lưu báo cáo" : "Tạo báo cáo làm việc"}
+                  </button>
+                </div>
+              )}
+
+              {!currentReport && (
+                <div className="signature-reminder no-print" role="status">
                   <CircleAlert size={20} aria-hidden="true" />
                   <span>
-                    Báo cáo đã được lưu. Vui lòng ký tên tại mục <strong>{pendingSignatureLabel}</strong> bên dưới để hoàn tất.
+                    {isScheduler
+                      ? "Ngày này chưa có báo cáo. Hãy tạo báo cáo để các khoa phòng điểm danh và ký tên."
+                      : "Điều phối chưa tạo báo cáo cho ngày này nên chưa thể điểm danh và ký tên."}
                   </span>
                 </div>
               )}
 
-              {/* Signatures Area */}
+              {myEntry && !myEntry.signature && currentReport && (
+                <div className="signature-reminder no-print" role="status">
+                  <CircleAlert size={20} aria-hidden="true" />
+                  <span>
+                    Khoa phòng <strong>{myEntry.departmentName}</strong> chưa ký tên cho buổi làm việc này.
+                  </span>
+                </div>
+              )}
+
               <div className="paper-signatures-section">
-                {/* Lãnh đạo khoa */}
                 <div className="signature-col">
-                  <h4>LÃNH ĐẠO KHOA</h4>
-                  {currentReport?.signatureLanhdao ? (
+                  <h4>ĐIỀU PHỐI</h4>
+                  <p className="signature-role-hint">
+                    {dayCoordinators.length > 0
+                      ? dayCoordinators.map((item) => item.fullName || item.username).join(", ")
+                      : "Chưa xếp điều phối cho ngày này"}
+                  </p>
+                  {currentReport?.signatureDieuPhoi ? (
                     <div className="saved-signature-display">
-                      <img src={currentReport.signatureLanhdao} alt="Chữ ký Lãnh đạo khoa" />
-                      <div className="signature-signer-name">{currentReport.signatureLanhdaoName}</div>
+                      <img src={currentReport.signatureDieuPhoi} alt="Chữ ký điều phối" />
+                      <div className="signature-signer-name">{currentReport.signatureDieuPhoiName}</div>
                       <div className="signature-time no-print">
-                        Đã ký: {formatVietnamDateTime(currentReport.signatureLanhdaoAt)}
+                        Đã ký: {formatVietnamDateTime(currentReport.signatureDieuPhoiAt)}
                       </div>
                     </div>
+                  ) : isScheduler && canSign && currentReport ? (
+                    <SignaturePad
+                      label="Ký chốt báo cáo"
+                      defaultName={user.fullName || user.username}
+                      storedSignature={user.signature}
+                      onQuickSave={(name) => void handleCoordinatorSign(name, undefined, true)}
+                      onSave={(sig, name) => void handleCoordinatorSign(name, sig)}
+                    />
                   ) : (
-                    <div className="unsigned-placeholder" style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%", alignItems: "center" }}>
-                      {isAdmin ? (
-                        <SignaturePad
-                          label="Ký tên Lãnh đạo khoa"
-                          defaultName={user.staffFullName || user.staffName || ""}
-                          storedSignature={user.signature}
-                          onQuickSave={(name) => handleSign("lanhdao", name, undefined, true)}
-                          onSave={(sig, name) => handleSign("lanhdao", name, sig)}
-                        />
-                      ) : (
-                        <p className="no-sig-text">Chưa ký</p>
-                      )}
-                    </div>
+                    <p className="no-sig-text">Chưa ký</p>
                   )}
-                </div>
-
-                {/* Bác sĩ trực */}
-                <div className="signature-col">
-                  <h4>BÁC SĨ TRỰC</h4>
-                  {currentReport?.signatureBs ? (
-                    <div className="saved-signature-display">
-                      <img src={currentReport.signatureBs} alt="Chữ ký Bác sĩ trực" />
-                      <div className="signature-signer-name">{currentReport.signatureBsName}</div>
-                      <div className="signature-time no-print">
-                        Đã ký: {formatVietnamDateTime(currentReport.signatureBsAt)}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="unsigned-placeholder" style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%", alignItems: "center" }}>
-                      {isDoctor ? (
-                        <SignaturePad
-                          label="Ký tên Bác sĩ trực"
-                          defaultName={user.staffFullName || user.staffName || ""}
-                          storedSignature={user.signature}
-                          onQuickSave={(name) => handleSign("bs", name, undefined, true)}
-                          onSave={(sig, name) => handleSign("bs", name, sig)}
-                        />
-                      ) : (
-                        <p className="no-sig-text">Chưa ký</p>
-                      )}
-                    </div>
-                  )}
-                </div>
-
-                {/* KTV trực */}
-                <div className="signature-col">
-                  <h4>KTV TRỰC</h4>
-                  {currentReport?.signatureKtv ? (
-                    <div className="saved-signature-display">
-                      <img src={currentReport.signatureKtv} alt="Chữ ký KTV trực" />
-                      <div className="signature-signer-name">{currentReport.signatureKtvName}</div>
-                      <div className="signature-time no-print">
-                        Đã ký: {formatVietnamDateTime(currentReport.signatureKtvAt)}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="unsigned-placeholder" style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%", alignItems: "center" }}>
-                      {isTechnician ? (
-                        <SignaturePad
-                          label="Ký tên KTV trực"
-                          defaultName={user.staffFullName || user.staffName || ""}
-                          storedSignature={user.signature}
-                          onQuickSave={(name) => handleSign("ktv", name, undefined, true)}
-                          onSave={(sig, name) => handleSign("ktv", name, sig)}
-                        />
-                      ) : (
-                        <p className="no-sig-text">Chưa ký</p>
-                      )}
-                    </div>
+                  {coordinatorSigned && (
+                    <p className="signature-role-hint no-print">
+                      {attendanceSummary(attendance.filter((entry) => entry.present).length, attendance.length)}
+                    </p>
                   )}
                 </div>
               </div>
@@ -816,7 +719,17 @@ export function ReportView({ user, notify, navigationTarget }: ReportViewProps) 
           </div>
         )}
       </div>
-      {renderReportSidebar("mobile")}
+      {renderSidebar("mobile")}
     </main>
   );
+
+  /** Nhảy tới ngày làm liền trước hoặc liền sau trong danh sách ngày làm. */
+  function shiftToNeighbourDay(direction: -1 | 1) {
+    const dates = reportsList.map((item) => item.date).sort((left, right) => left.localeCompare(right));
+    if (dates.length === 0) return;
+    const candidates = direction === 1
+      ? dates.filter((date) => date > selectedDate)
+      : dates.filter((date) => date < selectedDate).reverse();
+    if (candidates.length > 0) setSelectedDate(candidates[0]);
+  }
 }

@@ -1,187 +1,149 @@
 import { describe, expect, it } from "vitest";
 import {
   addDays,
-  conflictsWithDutyLeave,
-  formatLeaveRegistrationDateTime,
-  formatVietnamDateTime,
-  getDayOfWeekLabel,
+  addMonths,
+  canEditPersonOnDate,
+  currentMonthInVietnam,
+  formatFullDate,
+  formatMonthLabel,
+  isDaySession,
   isIsoDate,
-  normalizeWeekStart,
-  parseTimestamp,
-  postDutyOffDate,
+  isIsoMonth,
+  monthRange,
+  normalizeMonth,
+  rotationAssignmentsForWorkDays,
   rotationTurnIndex,
-  shouldSyncPostDutyOffDate,
-  todayInVietnam,
-  workRotationAssignmentsForDates,
-  workRotationAssignmentsForStaff
+  todayInVietnam
 } from "../src/shared/schedule";
-import type { ScheduleUnit, UnitRotation } from "../src/shared/types";
+import type { RotationMember } from "../src/shared/types";
 
-describe("schedule date rules", () => {
-  it("formats D1 leave registration timestamps in Vietnam time", () => {
-    expect(formatLeaveRegistrationDateTime("2026-05-01 20:30:00")).toBe("3h30 ngày 02/05/2026");
+function member(departmentId: number, turnIndex: number, memberOrder = 0): RotationMember {
+  return { departmentId, departmentName: `Khoa ${departmentId}`, turnIndex, memberOrder };
+}
+
+describe("ngày và tháng", () => {
+  it("cộng ngày qua mốc cuối tháng", () => {
+    expect(addDays("2026-08-31", 1)).toBe("2026-09-01");
+    expect(addDays("2026-03-01", -1)).toBe("2026-02-28");
   });
 
-  it("uses the day after weekday duty as the post-duty off day", () => {
-    expect(postDutyOffDate("2026-06-22")).toBe("2026-06-23");
-  });
-
-  it("keeps Friday duty off on Thursday", () => {
-    expect(postDutyOffDate("2026-06-26")).toBe("2026-06-25");
-  });
-
-  it("keeps Saturday duty off on Friday", () => {
-    expect(postDutyOffDate("2026-06-27")).toBe("2026-06-26");
-  });
-
-  it("carries post-duty off days across week boundaries", () => {
-    expect(postDutyOffDate("2026-06-28")).toBe("2026-06-29");
-  });
-
-  it("only syncs post-duty off days from today onward", () => {
-    expect(shouldSyncPostDutyOffDate("2026-07-11", "2026-07-13")).toBe(false);
-    expect(shouldSyncPostDutyOffDate("2026-07-12", "2026-07-13")).toBe(true);
-    expect(shouldSyncPostDutyOffDate("2026-07-13", "2026-07-13")).toBe(true);
-  });
-
-  it("restores each returning doctor from their own work rotation after a duty swap", () => {
-    const units: ScheduleUnit[] = [{
-      id: 10,
-      code: "mri2",
-      section: "II",
-      label: "MRI 2",
-      type: "work_bs",
-      maxPerDay: null,
-      sortOrder: 160,
-      computed: false
-    }];
-    const member = (staffId: number, turnIndex: number) => ({
-      staffId,
-      staffName: `BS ${staffId}`,
-      staffType: "BS" as const,
-      turnIndex,
-      memberOrder: 0
-    });
-    const rotations: UnitRotation[] = [{
-      unitId: 10,
-      startDate: "2026-07-22",
-      mode: "daily",
-      enabled: true,
-      turns: [[member(99, 0)], [member(2, 1)], [member(99, 2)]]
-    }];
-
-    expect(workRotationAssignmentsForStaff(units, rotations, 2, "2026-07-23")).toEqual([{ unitId: 10, slot: 0 }]);
-    expect(workRotationAssignmentsForStaff(units, rotations, 1, "2026-07-24")).toEqual([]);
-  });
-
-  it("restores each returning technician from their own work rotation after a duty swap", () => {
-    const units: ScheduleUnit[] = [{
-      id: 20,
-      code: "ktv_mri2",
-      section: "III",
-      label: "PHÒNG MRI 2",
-      type: "work_ktv",
-      maxPerDay: null,
-      sortOrder: 290,
-      computed: false
-    }];
-    const rotations: UnitRotation[] = [{
-      unitId: 20,
-      startDate: "2026-07-13",
-      mode: "weekly",
-      enabled: true,
-      turns: [[{
-        staffId: 22,
-        staffName: "Minh",
-        staffType: "KTV",
-        turnIndex: 0,
-        memberOrder: 0
-      }], [{
-        staffId: 20,
-        staffName: "Quốc Long",
-        staffType: "KTV",
-        turnIndex: 1,
-        memberOrder: 0
-      }]]
-    }];
-
-    expect(workRotationAssignmentsForStaff(units, rotations, 20, "2026-07-21")).toEqual([{ unitId: 20, slot: 0 }]);
-    expect(workRotationAssignmentsForStaff(units, rotations, 22, "2026-07-22")).toEqual([]);
-  });
-
-  it("fills rotation work on available days while skipping leave and post-duty days", () => {
-    const units: ScheduleUnit[] = [{
-      id: 10,
-      code: "mri2",
-      section: "II",
-      label: "MRI 2",
-      type: "work_bs",
-      maxPerDay: null,
-      sortOrder: 160,
-      computed: false
-    }];
-    const member = (staffId: number, turnIndex: number) => ({
-      staffId,
-      staffName: `BS ${staffId}`,
-      staffType: "BS" as const,
-      turnIndex,
-      memberOrder: 0
-    });
-    const rotations: UnitRotation[] = [{
-      unitId: 10,
-      startDate: "2026-08-03",
-      mode: "daily",
-      enabled: true,
-      turns: [[member(1, 0)], [member(2, 1)]]
-    }];
-    const unavailable = new Set(["1:2026-08-03", "2:2026-08-04"]);
-
-    expect(workRotationAssignmentsForDates(
-      units,
-      rotations,
-      ["2026-08-03", "2026-08-04", "2026-08-05"],
-      unavailable
-    )).toEqual([{ unitId: 10, date: "2026-08-05", staffId: 1, slot: 0 }]);
-  });
-
-  it("keeps rotation indexing stable before and after its start date", () => {
-    expect(rotationTurnIndex("2026-07-23", "2026-07-22", "daily", 3)).toBe(2);
-    expect(rotationTurnIndex("2026-07-23", "2026-07-30", "weekly", 3)).toBe(1);
-  });
-
-  it("blocks Thursday leave when Friday is the duty day", () => {
-    expect(conflictsWithDutyLeave("2026-06-26", "2026-06-25")).toBe(true);
-  });
-
-  it("does not treat an unrelated leave date as a duty conflict", () => {
-    expect(conflictsWithDutyLeave("2026-06-26", "2026-06-24")).toBe(false);
-  });
-
-  it("does calendar arithmetic without depending on the runtime timezone", () => {
-    expect(addDays("2024-02-28", 1)).toBe("2024-02-29");
-    expect(addDays("2026-12-31", 1)).toBe("2027-01-01");
-    expect(getDayOfWeekLabel("2026-07-19")).toBe("chủ nhật");
-  });
-
-  it("normalizes a requested date to its Monday", () => {
-    expect(normalizeWeekStart("2026-07-19")).toBe("2026-07-13");
-  });
-
-  it("uses the Vietnam calendar date at the UTC day boundary", () => {
-    expect(todayInVietnam(new Date("2026-07-14T18:00:00Z"))).toBe("2026-07-15");
-    expect(todayInVietnam(new Date("2026-07-14T16:59:59Z"))).toBe("2026-07-14");
-  });
-
-  it("strictly validates PostgreSQL DATE values", () => {
-    expect(isIsoDate("2024-02-29")).toBe(true);
+  it("chỉ nhận ngày ISO thật", () => {
     expect(isIsoDate("2026-02-29")).toBe(false);
-    expect(isIsoDate("2026-7-14")).toBe(false);
+    expect(isIsoDate("2028-02-29")).toBe(true);
+    expect(isIsoDate("2026-13-01")).toBe(false);
   });
 
-  it("parses PostgreSQL and legacy D1 timestamps safely", () => {
-    expect(parseTimestamp("2026-07-14T15:36:07.278+00:00")?.toISOString()).toBe("2026-07-14T15:36:07.278Z");
-    expect(parseTimestamp("2026-07-14 15:36:07")?.toISOString()).toBe("2026-07-14T15:36:07.000Z");
-    expect(parseTimestamp("not-a-date")).toBeNull();
-    expect(formatVietnamDateTime("2026-07-14T15:36:07.278+00:00")).toBe("14/07/2026 22:36");
+  it("kiểm tra tháng ISO", () => {
+    expect(isIsoMonth("2026-09")).toBe(true);
+    expect(isIsoMonth("2026-13")).toBe(false);
+    expect(isIsoMonth("2026-9")).toBe(false);
+  });
+
+  it("chuẩn hóa tháng và trả về tháng hiện tại khi tham số sai", () => {
+    expect(normalizeMonth("2026-09-05")).toBe("2026-09");
+    expect(normalizeMonth("sai")).toBe(currentMonthInVietnam());
+    expect(normalizeMonth(null)).toBe(currentMonthInVietnam());
+  });
+
+  it("tính khoảng ngày của tháng, kể cả tháng hai năm nhuận", () => {
+    expect(monthRange("2026-09")).toEqual({ from: "2026-09-01", to: "2026-09-30" });
+    expect(monthRange("2026-02")).toEqual({ from: "2026-02-01", to: "2026-02-28" });
+    expect(monthRange("2028-02")).toEqual({ from: "2028-02-01", to: "2028-02-29" });
+  });
+
+  it("chuyển tháng qua mốc cuối năm", () => {
+    expect(addMonths("2026-12", 1)).toBe("2027-01");
+    expect(addMonths("2026-01", -1)).toBe("2025-12");
+  });
+
+  it("hiển thị nhãn tháng và ngày kiểu Việt Nam", () => {
+    expect(formatMonthLabel("2026-09")).toBe("Tháng 9/2026");
+    expect(formatFullDate("2026-09-05")).toBe("05/09/2026");
+  });
+
+  it("nhận diện buổi làm việc hợp lệ", () => {
+    expect(isDaySession("morning")).toBe(true);
+    expect(isDaySession("full")).toBe(true);
+    expect(isDaySession("night")).toBe(false);
+  });
+
+  it("trả về ngày hôm nay theo giờ Việt Nam", () => {
+    // 23:30 UTC ngày 24/08 đã là 06:30 ngày 25/08 ở Việt Nam.
+    expect(todayInVietnam(new Date("2026-08-24T23:30:00Z"))).toBe("2026-08-25");
+  });
+});
+
+describe("quyền sửa người làm việc", () => {
+  it("cho sửa trong chính ngày làm khi không bật khóa", () => {
+    expect(canEditPersonOnDate("2026-09-05", "2026-09-05")).toBe(true);
+    expect(canEditPersonOnDate("2026-09-06", "2026-09-05")).toBe(true);
+    expect(canEditPersonOnDate("2026-09-04", "2026-09-05")).toBe(false);
+  });
+
+  it("khóa từ đầu ngày làm khi bật cấu hình khóa", () => {
+    expect(canEditPersonOnDate("2026-09-05", "2026-09-05", true)).toBe(false);
+    expect(canEditPersonOnDate("2026-09-06", "2026-09-05", true)).toBe(true);
+  });
+});
+
+describe("tua khám chạy theo ngày làm", () => {
+  const workDays = ["2026-09-05", "2026-09-12", "2026-09-19", "2026-09-26"];
+
+  it("xoay tua theo thứ tự ngày làm chứ không theo ngày dương lịch", () => {
+    expect(rotationTurnIndex(workDays, "2026-09-05", "2026-09-05", 2)).toBe(0);
+    expect(rotationTurnIndex(workDays, "2026-09-12", "2026-09-05", 2)).toBe(1);
+    expect(rotationTurnIndex(workDays, "2026-09-19", "2026-09-05", 2)).toBe(0);
+    expect(rotationTurnIndex(workDays, "2026-09-26", "2026-09-05", 2)).toBe(1);
+  });
+
+  it("bỏ qua ngày làm trước ngày bắt đầu tua", () => {
+    expect(rotationTurnIndex(workDays, "2026-09-05", "2026-09-12", 2)).toBe(-1);
+    expect(rotationTurnIndex(workDays, "2026-09-12", "2026-09-12", 2)).toBe(0);
+    expect(rotationTurnIndex(workDays, "2026-09-19", "2026-09-12", 2)).toBe(1);
+  });
+
+  it("không xoay được khi chưa có tua nào", () => {
+    expect(rotationTurnIndex(workDays, "2026-09-05", "2026-09-05", 0)).toBe(-1);
+  });
+
+  it("sinh phân công cho từng ngày làm theo tua", () => {
+    const turns: RotationMember[][] = [
+      [member(1, 0, 0), member(2, 0, 1)],
+      [member(3, 1, 0)]
+    ];
+    const assignments = rotationAssignmentsForWorkDays(workDays, turns, "2026-09-05");
+
+    expect(assignments).toEqual([
+      { date: "2026-09-05", departmentId: 1, memberOrder: 0 },
+      { date: "2026-09-05", departmentId: 2, memberOrder: 1 },
+      { date: "2026-09-12", departmentId: 3, memberOrder: 0 },
+      { date: "2026-09-19", departmentId: 1, memberOrder: 0 },
+      { date: "2026-09-19", departmentId: 2, memberOrder: 1 },
+      { date: "2026-09-26", departmentId: 3, memberOrder: 0 }
+    ]);
+  });
+
+  it("bỏ qua tua rỗng khi tính số tua", () => {
+    const turns: RotationMember[][] = [[member(1, 0)], [], [member(2, 2)]];
+    const assignments = rotationAssignmentsForWorkDays(["2026-09-05", "2026-09-12"], turns, "2026-09-05");
+
+    expect(assignments).toEqual([
+      { date: "2026-09-05", departmentId: 1, memberOrder: 0 },
+      { date: "2026-09-12", departmentId: 2, memberOrder: 0 }
+    ]);
+  });
+
+  it("không sinh phân công khi mọi tua đều rỗng", () => {
+    expect(rotationAssignmentsForWorkDays(workDays, [[], []], "2026-09-05")).toEqual([]);
+  });
+
+  it("sắp xếp lại ngày làm truyền vào không đúng thứ tự", () => {
+    const turns: RotationMember[][] = [[member(1, 0)], [member(2, 1)]];
+    const assignments = rotationAssignmentsForWorkDays(["2026-09-12", "2026-09-05"], turns, "2026-09-05");
+
+    expect(assignments).toEqual([
+      { date: "2026-09-05", departmentId: 1, memberOrder: 0 },
+      { date: "2026-09-12", departmentId: 2, memberOrder: 0 }
+    ]);
   });
 });

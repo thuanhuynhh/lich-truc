@@ -1,80 +1,36 @@
-import type { ScheduleUnit, StaffType, UnitKind, UnitRotation } from "./types";
+import type { DaySession, RotationMember } from "./types";
 
-export const DAYS = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"] as const;
 export const APP_TIME_ZONE = "Asia/Ho_Chi_Minh";
 
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_MONTH_PATTERN = /^\d{4}-\d{2}$/;
 
-export interface SeedUnit {
-  code: string;
-  section: "I" | "II" | "III";
-  label: string;
-  type: UnitKind;
-  maxPerDay: number | null;
-  sortOrder: number;
-  computed: boolean;
+export const DAY_SESSIONS: DaySession[] = ["morning", "afternoon", "full"];
+
+export const SESSION_LABELS: Record<DaySession, string> = {
+  morning: "Sáng",
+  afternoon: "Chiều",
+  full: "Cả buổi"
+};
+
+export const SESSION_SHORT_LABELS: Record<DaySession, string> = {
+  morning: "S",
+  afternoon: "C",
+  full: "CB"
+};
+
+const WEEKDAY_LABELS = ["CN", "T2", "T3", "T4", "T5", "T6", "T7"];
+
+export function isDaySession(value: unknown): value is DaySession {
+  return value === "morning" || value === "afternoon" || value === "full";
 }
 
-export const SCHEDULE_UNITS: SeedUnit[] = [
-  { code: "duty_common", section: "I", label: "LỊCH TRỰC CHUNG", type: "duty_common", maxPerDay: null, sortOrder: 10, computed: true },
-  { code: "duty_bs", section: "I", label: "LỊCH TRỰC BÁC SĨ", type: "duty_bs", maxPerDay: 1, sortOrder: 20, computed: false },
-  { code: "duty_ktv", section: "I", label: "LỊCH TRỰC KỸ THUẬT VIÊN", type: "duty_ktv", maxPerDay: 2, sortOrder: 30, computed: false },
-  { code: "leave", section: "I", label: "NGHỈ PHÉP", type: "leave", maxPerDay: null, sortOrder: 40, computed: true },
-  { code: "xq1", section: "II", label: "X QUANG 1", type: "work_bs", maxPerDay: null, sortOrder: 110, computed: false },
-  { code: "xq2", section: "II", label: "X QUANG 2", type: "work_bs", maxPerDay: null, sortOrder: 120, computed: false },
-  { code: "ct64_128", section: "II", label: "CT 64+128", type: "work_bs", maxPerDay: null, sortOrder: 130, computed: false },
-  { code: "ct512", section: "II", label: "CT 512", type: "work_bs", maxPerDay: null, sortOrder: 140, computed: false },
-  { code: "mri1", section: "II", label: "MRI 1", type: "work_bs", maxPerDay: null, sortOrder: 150, computed: false },
-  { code: "mri2", section: "II", label: "MRI 2", type: "work_bs", maxPerDay: null, sortOrder: 160, computed: false },
-  { code: "xqdv", section: "II", label: "X QUANG DV", type: "work_bs", maxPerDay: null, sortOrder: 170, computed: false },
-  { code: "ktv_mri", section: "III", label: "PHÒNG MRI 1", type: "work_ktv", maxPerDay: null, sortOrder: 210, computed: false },
-  { code: "ktv_tai_giuong", section: "III", label: "TẠI GIƯỜNG", type: "work_ktv", maxPerDay: null, sortOrder: 220, computed: false },
-  { code: "ktv_ct1", section: "III", label: "PHÒNG CT 1", type: "work_ktv", maxPerDay: null, sortOrder: 230, computed: false },
-  { code: "ktv_ct2", section: "III", label: "PHÒNG CT 2", type: "work_ktv", maxPerDay: null, sortOrder: 240, computed: false },
-  { code: "ktv_thay1", section: "III", label: "THAY RA TRỰC 1", type: "work_ktv", maxPerDay: null, sortOrder: 250, computed: false },
-  { code: "ktv_thay2", section: "III", label: "THAY RA TRỰC 2", type: "work_ktv", maxPerDay: null, sortOrder: 260, computed: false },
-  { code: "ktv_rang", section: "III", label: "RĂNG KTC", type: "work_ktv", maxPerDay: null, sortOrder: 270, computed: false },
-  { code: "ktv_phong4", section: "III", label: "PHÒNG 4", type: "work_ktv", maxPerDay: null, sortOrder: 280, computed: false },
-  { code: "ktv_mri2", section: "III", label: "PHÒNG MRI 2", type: "work_ktv", maxPerDay: null, sortOrder: 290, computed: false },
-  { code: "ktv_phong3", section: "III", label: "PHÒNG 3", type: "work_ktv", maxPerDay: null, sortOrder: 300, computed: false },
-  { code: "ktv_lx_nhu_anh_tiep_nhan", section: "III", label: "PHÒNG LX + X-QUANG NHŨ ẢNH", type: "work_ktv", maxPerDay: null, sortOrder: 310, computed: false },
-  { code: "ktv_nhu_anh", section: "III", label: "X-QUANG NHŨ ẢNH", type: "work_ktv", maxPerDay: null, sortOrder: 320, computed: false },
-  { code: "ktv_xqdv", section: "III", label: "PHÒNG X-QUANG DỊCH VỤ", type: "work_ktv", maxPerDay: null, sortOrder: 330, computed: false },
-  { code: "ktv_ct3_nhu_anh", section: "III", label: "PHÒNG CT 3", type: "work_ktv", maxPerDay: null, sortOrder: 340, computed: false },
-  { code: "ktv_dsa_carm", section: "III", label: "DSA & C-ARM", type: "work_ktv", maxPerDay: null, sortOrder: 350, computed: false },
-  { code: "ktv_huong_dan", section: "III", label: "TIẾP NHẬN & HƯỚNG DẪN BN CHỤP X-QUANG TẠI KHOA", type: "work_ktv", maxPerDay: null, sortOrder: 360, computed: false },
-  { code: "ktv_huong_dan_mri_ct", section: "III", label: "TIẾP NHẬN & HƯỚNG DẪN BN CHỤP MRI & CT", type: "work_ktv", maxPerDay: null, sortOrder: 370, computed: false }
-];
-
-export function staffTypeForUnit(type: UnitKind): StaffType | null {
-  if (type === "duty_bs" || type === "work_bs") return "BS";
-  if (type === "duty_ktv" || type === "work_ktv") return "KTV";
-  return null;
-}
-
-export function staffTypesForUnit(type: UnitKind): StaffType[] {
-  if (type === "duty_bs" || type === "work_bs") return ["BS"];
-  if (type === "duty_ktv") return ["KTV"];
-  if (type === "work_ktv") return ["KTV", "TKYK"];
-  return [];
-}
-
-export function acceptsStaffTypeForUnit(type: UnitKind, staffType: StaffType): boolean {
-  const allowedTypes = staffTypesForUnit(type);
-  return allowedTypes.length === 0 || allowedTypes.includes(staffType);
+export function sessionLabel(session: DaySession): string {
+  return SESSION_LABELS[session];
 }
 
 export function toIsoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
-}
-
-export function getMonday(input = new Date()): Date {
-  const date = new Date(input);
-  date.setUTCHours(0, 0, 0, 0);
-  const day = date.getUTCDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  date.setUTCDate(date.getUTCDate() + diff);
-  return date;
 }
 
 export function addDays(isoDate: string, days: number): string {
@@ -83,126 +39,16 @@ export function addDays(isoDate: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-export function postDutyOffDate(dutyDate: string): string {
-  const dutyDay = new Date(`${dutyDate}T00:00:00Z`).getUTCDay();
-  if (dutyDay === 5 || dutyDay === 6) return addDays(dutyDate, -1);
-  return addDays(dutyDate, 1);
-}
-
-export function conflictsWithDutyLeave(dutyDate: string, leaveDate: string): boolean {
-  return dutyDate === leaveDate || postDutyOffDate(dutyDate) === leaveDate;
-}
-
-export function formatLeaveRegistrationDateTime(value?: string | null): string {
-  if (!value) return "";
-  const date = parseTimestamp(value);
-  if (!date) return "";
-  const parts = new Intl.DateTimeFormat("vi-VN", {
-    timeZone: APP_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23"
-  }).formatToParts(date);
-  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value || "";
-  return `${Number(part("hour"))}h${part("minute")} ngày ${part("day")}/${part("month")}/${part("year")}`;
-}
-
-export function shouldSyncPostDutyOffDate(dutyDate: string, today: string): boolean {
-  return postDutyOffDate(dutyDate) >= today;
-}
-
-export function rotationTurnIndex(
-  startDate: string,
-  date: string,
-  mode: UnitRotation["mode"],
-  turnCount: number
-): number {
-  if (turnCount <= 0) return -1;
-  const start = new Date(`${startDate}T00:00:00Z`);
-  const current = new Date(`${date}T00:00:00Z`);
-  const delta = Math.round((current.getTime() - start.getTime()) / 86400000);
-  const step = mode === "weekly" ? Math.floor(delta / 7) : delta;
-  return ((step % turnCount) + turnCount) % turnCount;
-}
-
-export function workRotationAssignmentsForStaff(
-  units: ScheduleUnit[],
-  rotations: UnitRotation[],
-  staffId: number,
-  date: string
-): Array<{ unitId: number; slot: number }> {
-  const unitsById = new Map(units.map((unit) => [unit.id, unit]));
-  const assignments: Array<{ unitId: number; slot: number }> = [];
-
-  for (const rotation of rotations) {
-    const unit = unitsById.get(rotation.unitId);
-    const turns = rotation.turns.filter((turn) => Array.isArray(turn) && turn.length > 0);
-    if (!rotation.enabled || !unit || (unit.type !== "work_bs" && unit.type !== "work_ktv") || turns.length === 0) continue;
-
-    const turnIndex = rotationTurnIndex(rotation.startDate, date, rotation.mode, turns.length);
-    const slot = turns[turnIndex].findIndex((member) => member.staffId === staffId);
-    if (slot >= 0) assignments.push({ unitId: unit.id, slot });
-  }
-
-  return assignments;
-}
-
-export function workRotationAssignmentsForDates(
-  units: ScheduleUnit[],
-  rotations: UnitRotation[],
-  dates: string[],
-  unavailableStaffDays: ReadonlySet<string>
-): Array<{ unitId: number; date: string; staffId: number; slot: number }> {
-  const unitsById = new Map(units.map((unit) => [unit.id, unit]));
-  const assignments: Array<{ unitId: number; date: string; staffId: number; slot: number }> = [];
-
-  for (const rotation of rotations) {
-    const unit = unitsById.get(rotation.unitId);
-    const turns = rotation.turns.filter((turn) => Array.isArray(turn) && turn.length > 0);
-    if (!rotation.enabled || !unit || (unit.type !== "work_bs" && unit.type !== "work_ktv") || turns.length === 0) continue;
-
-    for (const date of dates) {
-      const turnIndex = rotationTurnIndex(rotation.startDate, date, rotation.mode, turns.length);
-      for (const [slot, member] of turns[turnIndex].entries()) {
-        if (unavailableStaffDays.has(`${member.staffId}:${date}`)) continue;
-        assignments.push({ unitId: unit.id, date, staffId: member.staffId, slot });
-      }
-    }
-  }
-
-  return assignments;
-}
-
-export function getWeekDays(weekStart: string): string[] {
-  return Array.from({ length: 7 }, (_, index) => addDays(weekStart, index));
-}
-
-export function normalizeWeekStart(value: string | null | undefined): string {
-  const date = value && isIsoDate(value) ? value : todayInVietnam();
-  const day = new Date(`${date}T00:00:00Z`).getUTCDay();
-  return addDays(date, day === 0 ? -6 : 1 - day);
-}
-
-export function getDayOfWeekLabel(value: string): string {
-  const day = new Date(`${value}T00:00:00Z`).getUTCDay();
-  if (day === 0) return "chủ nhật";
-  return `thứ ${day + 1}`;
-}
-
-export function formatDate(value: string): string {
-  const parts = value.split("-");
-  if (parts.length < 3) return value;
-  const [, month, day] = parts;
-  return `${day}/${month}`;
-}
-
 export function isIsoDate(value: string): boolean {
   if (!ISO_DATE_PATTERN.test(value)) return false;
   const parsed = new Date(`${value}T00:00:00Z`);
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+export function isIsoMonth(value: string): boolean {
+  if (!ISO_MONTH_PATTERN.test(value)) return false;
+  const month = Number(value.slice(5, 7));
+  return month >= 1 && month <= 12;
 }
 
 export function todayInVietnam(now = new Date()): string {
@@ -214,6 +60,127 @@ export function todayInVietnam(now = new Date()): string {
   }).formatToParts(now);
   const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${value.year}-${value.month}-${value.day}`;
+}
+
+export function currentMonthInVietnam(now = new Date()): string {
+  return todayInVietnam(now).slice(0, 7);
+}
+
+/** Chuẩn hóa tham số tháng về dạng YYYY-MM, mặc định là tháng hiện tại. */
+export function normalizeMonth(value: string | null | undefined): string {
+  if (!value) return currentMonthInVietnam();
+  const trimmed = value.slice(0, 7);
+  return isIsoMonth(trimmed) ? trimmed : currentMonthInVietnam();
+}
+
+export function monthRange(month: string): { from: string; to: string } {
+  const normalized = normalizeMonth(month);
+  const [year, monthNumber] = normalized.split("-").map(Number);
+  const lastDay = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+  return {
+    from: `${normalized}-01`,
+    to: `${normalized}-${String(lastDay).padStart(2, "0")}`
+  };
+}
+
+export function addMonths(month: string, delta: number): string {
+  const normalized = normalizeMonth(month);
+  const [year, monthNumber] = normalized.split("-").map(Number);
+  const date = new Date(Date.UTC(year, monthNumber - 1 + delta, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+export function formatMonthLabel(month: string): string {
+  const normalized = normalizeMonth(month);
+  return `Tháng ${Number(normalized.slice(5, 7))}/${normalized.slice(0, 4)}`;
+}
+
+/** 05/09 — nhãn ngắn dùng cho tiêu đề cột. */
+export function formatDate(value: string): string {
+  const parts = value.split("-");
+  if (parts.length < 3) return value;
+  const [, month, day] = parts;
+  return `${day}/${month}`;
+}
+
+/** 05/09/2026 — nhãn đầy đủ dùng cho báo cáo. */
+export function formatFullDate(value: string): string {
+  const parts = value.split("-");
+  if (parts.length < 3) return value;
+  const [year, month, day] = parts;
+  return `${day}/${month}/${year}`;
+}
+
+export function getWeekdayLabel(value: string): string {
+  const day = new Date(`${value}T00:00:00Z`).getUTCDay();
+  return WEEKDAY_LABELS[day] || "";
+}
+
+export function getDayOfWeekLabel(value: string): string {
+  const day = new Date(`${value}T00:00:00Z`).getUTCDay();
+  if (day === 0) return "chủ nhật";
+  return `thứ ${day + 1}`;
+}
+
+/**
+ * Khoa phòng chỉ được sửa họ tên và số điện thoại khi ngày làm chưa qua.
+ * Mặc định ngày làm hôm nay vẫn còn sửa được; bật `lockOnWorkDay` thì phải
+ * điền xong từ trước ngày làm.
+ */
+export function canEditPersonOnDate(
+  date: string,
+  today = todayInVietnam(),
+  lockOnWorkDay = false
+): boolean {
+  return lockOnWorkDay ? date > today : date >= today;
+}
+
+/**
+ * Vị trí tua của một ngày làm. Tua chạy theo thứ tự ngày làm chứ không theo
+ * ngày dương lịch, vì lịch khám không liên tục.
+ */
+export function rotationTurnIndex(
+  workDays: string[],
+  date: string,
+  startDate: string,
+  turnCount: number
+): number {
+  if (turnCount <= 0) return -1;
+  const eligible = workDays
+    .filter((workDay) => workDay >= startDate)
+    .sort((left, right) => left.localeCompare(right));
+  const position = eligible.indexOf(date);
+  if (position < 0) return -1;
+  return position % turnCount;
+}
+
+export interface RotationAssignment {
+  date: string;
+  departmentId: number;
+  memberOrder: number;
+}
+
+/** Sinh danh sách phân công theo tua cho các ngày làm đã cho. */
+export function rotationAssignmentsForWorkDays(
+  workDays: string[],
+  turns: RotationMember[][],
+  startDate: string
+): RotationAssignment[] {
+  const usableTurns = turns.filter((turn) => Array.isArray(turn) && turn.length > 0);
+  if (usableTurns.length === 0) return [];
+
+  const sortedWorkDays = [...workDays].sort((left, right) => left.localeCompare(right));
+  const assignments: RotationAssignment[] = [];
+
+  for (const date of sortedWorkDays) {
+    const turnIndex = rotationTurnIndex(sortedWorkDays, date, startDate, usableTurns.length);
+    if (turnIndex < 0) continue;
+    for (const [memberOrder, member] of usableTurns[turnIndex].entries()) {
+      assignments.push({ date, departmentId: member.departmentId, memberOrder });
+    }
+  }
+
+  return assignments;
 }
 
 export function parseTimestamp(value?: string | null): Date | null {

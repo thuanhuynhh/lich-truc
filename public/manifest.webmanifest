@@ -1,7 +1,7 @@
 {
-  "name": "Lịch làm việc Khoa Chẩn đoán hình ảnh",
-  "short_name": "Lịch trực",
-  "description": "Lịch làm việc Khoa Chẩn đoán hình ảnh - Bệnh viện Thống Nhất",
+  "name": "Lịch khám sức khỏe toàn dân",
+  "short_name": "Lịch KSKTD",
+  "description": "Lịch khám sức khỏe toàn dân: ngày làm việc, phân công khoa phòng và báo cáo làm việc",
   "lang": "vi",
   "start_url": "/",
   "scope": "/",

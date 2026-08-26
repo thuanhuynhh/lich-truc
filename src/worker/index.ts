@@ -1,21 +1,45 @@
 import type {
   Assignment,
+  AttendanceEntry,
   AuditLog,
-  DutyReport,
-  LeaveDay,
+  CoordinatorAssignment,
+  DaySession,
+  Department,
   NotificationItem,
   Role,
+  Rotation,
+  RotationMember,
   ScheduleResponse,
-  ScheduleUnit,
-  Staff,
-  StaffType,
-  UnitRotation,
+  SwapRequest,
+  SystemSettings,
   User,
-  SystemSettings
+  WorkDay,
+  WorkReport
 } from "../shared/types";
-import { acceptsStaffTypeForUnit, addDays, conflictsWithDutyLeave, getWeekDays, normalizeWeekStart, postDutyOffDate, shouldSyncPostDutyOffDate, getDayOfWeekLabel, formatDate, isIsoDate, rotationTurnIndex, todayInVietnam, workRotationAssignmentsForDates, workRotationAssignmentsForStaff } from "../shared/schedule";
+import {
+  addDays,
+  canEditPersonOnDate,
+  formatFullDate,
+  isDaySession,
+  isIsoDate,
+  monthRange,
+  normalizeMonth,
+  rotationAssignmentsForWorkDays,
+  sessionLabel,
+  todayInVietnam
+} from "../shared/schedule";
 import { getAuditActionValues } from "../shared/audit";
-import { isReportRole, resolveReportSignerName, validateAssignmentInput, validateLeaveInput } from "../shared/validation";
+import {
+  canManageSchedule,
+  isRole,
+  isSignerRole,
+  normalizePhone,
+  resolveSignerName,
+  roleLabel,
+  validateAssignmentInput,
+  validateCoordinatorSwap,
+  validatePersonInput
+} from "../shared/validation";
 import { PostgresDatabase, type PostgresPreparedStatement, createPostgresClient } from "./database";
 
 interface Env {
@@ -26,11 +50,71 @@ interface SessionUser extends User {
   sessionId: string;
 }
 
-const SESSION_COOKIE = "lt_session";
+const SESSION_COOKIE = "lk_session";
 const SESSION_DAYS = 14;
 
-export function dutyReportUpdateWhere(_role: Role): string {
-  return "date = ?";
+/**
+ * Điều kiện cập nhật người làm việc của một ô lịch. Khoa phòng chỉ sửa được ô
+ * của chính mình và chỉ khi ngày làm chưa qua; admin và điều phối sửa mọi ô.
+ */
+export function assignmentPersonUpdate(params: {
+  assignmentId: number;
+  role: Role;
+  departmentId: number | null;
+  userId: number;
+  personName: string;
+  personPhone: string;
+  today: string;
+  lockOnWorkDay?: boolean;
+}): { sql: string; bindings: unknown[] } {
+  const base =
+    "UPDATE assignments SET person_name = ?, person_phone = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?";
+  const bindings: unknown[] = [params.personName, params.personPhone, params.userId, params.assignmentId];
+  if (canManageSchedule(params.role)) return { sql: base, bindings };
+  return {
+    sql: `${base} AND department_id = ? AND date ${params.lockOnWorkDay ? ">" : ">="} ?`,
+    bindings: [...bindings, params.departmentId, params.today]
+  };
+}
+
+export function rotationDepartmentLookup(departmentIds: number[]): { sql: string; bindings: number[] } {
+  return {
+    sql: `SELECT id, name, active, sort_order FROM departments WHERE id IN (${departmentIds.map(() => "?").join(", ")})`,
+    bindings: departmentIds
+  };
+}
+
+export function rotationMembersInsert(turns: number[][]): { sql: string; bindings: number[] } {
+  const bindings: number[] = [];
+  const values = turns.flatMap((turn, turnIndex) =>
+    turn.map((departmentId, memberOrder) => {
+      bindings.push(turnIndex, departmentId, memberOrder);
+      return "(?, ?, ?)";
+    })
+  );
+  return {
+    sql: `INSERT INTO rotation_members (turn_index, department_id, member_order) VALUES ${values.join(", ")}`,
+    bindings
+  };
+}
+
+export function passwordResetSessionCleanup(
+  actorUserId: number,
+  targetUserId: number,
+  currentSessionId: string
+): { sql: string; bindings: unknown[] } {
+  return actorUserId === targetUserId
+    ? { sql: "DELETE FROM user_sessions WHERE user_id = ? AND id <> ?", bindings: [targetUserId, currentSessionId] }
+    : { sql: "DELETE FROM user_sessions WHERE user_id = ?", bindings: [targetUserId] };
+}
+
+export function usernameAvailabilityLookup(
+  username: string,
+  exceptUserId?: number
+): { sql: string; bindings: unknown[] } {
+  return exceptUserId === undefined
+    ? { sql: "SELECT id FROM users WHERE lower(username) = lower(?)", bindings: [username] }
+    : { sql: "SELECT id FROM users WHERE lower(username) = lower(?) AND id <> ?", bindings: [username, exceptUserId] };
 }
 
 export default {
@@ -68,74 +152,74 @@ async function routeApi(request: Request, env: Env, url: URL): Promise<Response>
 
   const user = await requireUser(request, env);
 
-  if (path === "/api/swap/request" && method === "GET") return getSwapRequestPublic(env, url, user);
-  if (path === "/api/swap/accept" && method === "POST") return acceptSwapPublic(env, url, user);
-  if (path === "/api/swap/reject" && method === "POST") return rejectSwapPublic(env, url, user);
-
   if (path === "/api/auth/me" && method === "GET") return json({ user: publicUser(user) });
   if (path === "/api/notifications" && method === "GET") return getNotifications(env, user);
   if (path === "/api/notifications/read" && method === "POST") return markNotificationsRead(request, env, user);
   if (path === "/api/profile" && method === "PATCH") return updateProfile(request, env, user);
-  if (path === "/api/staff" && method === "GET") return json({ staff: await listStaff(env) });
-  if (path === "/api/staff" && method === "POST") return createStaff(request, env, user);
-  if (path.startsWith("/api/staff/") && method === "PATCH") return updateStaff(request, env, user, idFromPath(path));
-  if (path.startsWith("/api/staff/") && method === "DELETE") return deleteStaff(env, user, idFromPath(path));
 
-  if (path === "/api/users" && method === "GET") return listUsers(env, user);
-  if (path === "/api/users" && method === "POST") return createUser(request, env, user);
-  if (path.startsWith("/api/users/") && method === "PATCH") return updateUser(request, env, user, idFromPath(path));
-  if (path.startsWith("/api/users/") && method === "DELETE") return deleteUser(env, user, idFromPath(path));
-
-  // Admin configuration settings
-  if (path === "/api/settings" && method === "GET") return getSettingsEndpoint(env, user);
-  if (path === "/api/settings" && method === "POST") return saveSettingsEndpoint(request, env, user);
-  if (path === "/api/settings/blocked-days" && method === "POST") return addBlockedDay(request, env, user);
-  if (path.startsWith("/api/settings/blocked-days/") && method === "DELETE") {
-    return deleteBlockedDay(env, user, path.split("/").pop() || "");
+  if (path === "/api/departments" && method === "GET") return json({ departments: await listDepartments(env) });
+  if (path === "/api/departments" && method === "POST") return createDepartment(request, env, user);
+  if (path.match(/^\/api\/departments\/\d+$/) && method === "PATCH") {
+    return updateDepartment(request, env, user, idFromPath(path));
+  }
+  if (path.match(/^\/api\/departments\/\d+$/) && method === "DELETE") {
+    return deleteDepartment(env, user, idFromPath(path));
   }
 
+  if (path === "/api/users" && method === "GET") return listUsersEndpoint(env, user);
+  if (path === "/api/users" && method === "POST") return createUser(request, env, user);
+  if (path.match(/^\/api\/users\/\d+$/) && method === "PATCH") return updateUser(request, env, user, idFromPath(path));
+  if (path.match(/^\/api\/users\/\d+$/) && method === "DELETE") return deleteUser(env, user, idFromPath(path));
+
+  if (path === "/api/settings" && method === "GET") return getSettingsEndpoint(env, user);
+  if (path === "/api/settings" && method === "POST") return saveSettingsEndpoint(request, env, user);
+
   if (path === "/api/schedule" && method === "GET") return getSchedule(env, url, user);
+
+  if (path === "/api/work-days" && method === "POST") return createWorkDay(request, env, user);
+  if (path.startsWith("/api/work-days/") && method === "PATCH") {
+    return updateWorkDay(request, env, user, dateFromPath(path));
+  }
+  if (path.startsWith("/api/work-days/") && method === "DELETE") {
+    return deleteWorkDay(env, user, dateFromPath(path));
+  }
+
   if (path === "/api/schedule/assignment" && method === "PUT") return putAssignment(request, env, user);
+  if (path.match(/^\/api\/schedule\/assignment\/\d+\/person$/) && method === "PATCH") {
+    return updateAssignmentPerson(request, env, user, Number(path.split("/").at(-2)));
+  }
   if (path.match(/^\/api\/schedule\/assignment\/\d+\/move$/) && method === "PATCH") {
     return moveAssignment(request, env, user, Number(path.split("/").at(-2)));
   }
-  if (path.startsWith("/api/schedule/assignment/") && method === "DELETE") {
+  if (path.match(/^\/api\/schedule\/assignment\/\d+$/) && method === "DELETE") {
     return deleteAssignment(env, user, idFromPath(path));
   }
-  if (path === "/api/schedule/confirm" && method === "POST") return confirmSchedule(request, env, user);
   if (path === "/api/schedule/clear" && method === "POST") return clearSchedule(request, env, user);
-  if (path === "/api/schedule/recalculate-work" && method === "POST") return recalculateWorkSchedule(request, env, user);
-  if (path.match(/^\/api\/rotations\/\d+$/) && method === "PUT") return saveRotation(request, env, user, idFromPath(path));
-  if (path.match(/^\/api\/rotations\/\d+\/apply$/) && method === "POST") {
-    return applyRotation(request, env, user, Number(path.split("/").at(-2)));
-  }
-  if (path === "/api/units/reorder" && method === "POST") return reorderUnits(request, env, user);
-  if (path === "/api/units" && method === "POST") return createUnit(request, env, user);
-  if (path.match(/^\/api\/units\/\d+$/) && method === "PATCH") return updateUnit(request, env, user, idFromPath(path));
-  if (path.match(/^\/api\/units\/\d+$/) && method === "DELETE") return deleteUnit(env, user, idFromPath(path));
 
-  if (path === "/api/leave/month" && method === "GET") return getLeaveMonth(env, url, user);
-  if (path === "/api/leave" && method === "GET") return getLeave(env, url);
-  if (path === "/api/leave" && method === "POST") return createLeave(request, env, user);
-  if (path.startsWith("/api/leave-day/") && method === "DELETE") return cancelLeaveDay(env, user, idFromPath(path));
-  if (path.startsWith("/api/leave/") && method === "DELETE") return cancelLeave(env, user, idFromPath(path));
+  if (path === "/api/coordinator-assignment" && method === "PUT") return putCoordinatorAssignment(request, env, user);
+  if (path.match(/^\/api\/coordinator-assignment\/\d+$/) && method === "DELETE") {
+    return deleteCoordinatorAssignment(env, user, idFromPath(path));
+  }
+  if (path.match(/^\/api\/coordinator-assignment\/\d+\/move$/) && method === "PATCH") {
+    return moveCoordinatorAssignment(request, env, user, Number(path.split("/").at(-2)));
+  }
+  if (path === "/api/coordinator-swap" && method === "POST") return requestCoordinatorSwap(request, env, user);
+  if (path === "/api/coordinator-swap" && method === "GET") return getSwapRequestEndpoint(env, url, user);
+  if (path === "/api/coordinator-swap/accept" && method === "POST") return acceptSwapEndpoint(env, url, user);
+  if (path === "/api/coordinator-swap/reject" && method === "POST") return rejectSwapEndpoint(env, url, user);
 
-  // Leave approvals
-  if (path.match(/^\/api\/leave\/\d+\/approve$/) && method === "POST") {
-    return approveLeave(env, user, Number(path.split("/").at(-2)));
-  }
-  if (path.match(/^\/api\/leave\/\d+\/reject$/) && method === "POST") {
-    return rejectLeave(env, user, Number(path.split("/").at(-2)));
-  }
+  if (path === "/api/rotation" && method === "GET") return json({ rotation: await loadRotation(env) });
+  if (path === "/api/rotation" && method === "PUT") return saveRotation(request, env, user);
+  if (path === "/api/rotation/apply" && method === "POST") return applyRotation(request, env, user);
 
   if (path === "/api/audit" && method === "GET") return getAudit(env, url, user);
   if (path === "/api/audit" && method === "DELETE") return deleteAuditEndpoint(env, url, user);
 
-  // Duty reports
   if (path === "/api/reports" && method === "GET") return getReportEndpoint(env, url, user);
   if (path === "/api/reports/list" && method === "GET") return listReportsEndpoint(env);
   if (path === "/api/reports" && method === "POST") return saveReportEndpoint(request, env, user);
   if (path === "/api/reports" && method === "DELETE") return deleteReportEndpoint(env, url, user);
+  if (path === "/api/reports/attendance" && method === "POST") return saveAttendanceEndpoint(request, env, user);
   if (path === "/api/reports/sign" && method === "POST") return signReportEndpoint(request, env, user);
 
   throw new HttpError(404, "Không tìm thấy API.");
@@ -148,9 +232,9 @@ async function login(request: Request, env: Env): Promise<Response> {
   if (!username || !password) throw new HttpError(400, "Thiếu tên đăng nhập hoặc mật khẩu.");
 
   const row = await env.DB.prepare(
-    `SELECT u.id, u.username, u.password_salt, u.password_hash, u.role, u.staff_id, s.name AS staff_name,
-            TRIM(COALESCE(s.family_middle_name, '') || ' ' || COALESCE(s.name, '')) AS staff_full_name, u.signature
-     FROM users u LEFT JOIN staff s ON s.id = u.staff_id
+    `SELECT u.id, u.username, u.password_salt, u.password_hash, u.role, u.department_id, u.full_name,
+            d.name AS department_name, u.signature
+     FROM users u LEFT JOIN departments d ON d.id = u.department_id
      WHERE lower(u.username) = lower(?) AND u.disabled = 0`
   ).bind(username).first<UserRow & { password_salt: string; password_hash: string }>();
 
@@ -184,12 +268,11 @@ async function requireUser(request: Request, env: Env): Promise<SessionUser> {
   const sessionId = parseCookies(request.headers.get("Cookie")).get(SESSION_COOKIE);
   if (!sessionId) throw new HttpError(401, "Chưa đăng nhập.");
   const row = await env.DB.prepare(
-    `SELECT u.id, u.username, u.role, u.staff_id, s.name AS staff_name,
-            TRIM(COALESCE(s.family_middle_name, '') || ' ' || COALESCE(s.name, '')) AS staff_full_name,
+    `SELECT u.id, u.username, u.role, u.department_id, u.full_name, d.name AS department_name,
             us.id AS session_id, u.signature
      FROM user_sessions us
      JOIN users u ON u.id = us.user_id
-     LEFT JOIN staff s ON s.id = u.staff_id
+     LEFT JOIN departments d ON d.id = u.department_id
      WHERE us.id = ? AND us.expires_at > CURRENT_TIMESTAMP AND u.disabled = 0`
   ).bind(sessionId).first<UserRow & { session_id: string }>();
   if (!row) throw new HttpError(401, "Phiên đăng nhập đã hết hạn.");
@@ -197,15 +280,28 @@ async function requireUser(request: Request, env: Env): Promise<SessionUser> {
 }
 
 function requireAdmin(user: User): void {
-  if (user.role !== "admin") throw new HttpError(403, "Chỉ admin được thực hiện thao tác này.");
+  if (user.role !== "admin") throw new HttpError(403, "Chỉ tài khoản quản lý được thực hiện thao tác này.");
+}
+
+/** Admin và điều phối đều được lên lịch. */
+function requireScheduler(user: User): void {
+  if (!canManageSchedule(user.role)) {
+    throw new HttpError(403, "Chỉ quản lý hoặc điều phối được lên lịch.");
+  }
 }
 
 async function updateProfile(request: Request, env: Env, user: SessionUser): Promise<Response> {
-  const body = await readJson<{ currentPassword?: string; newPassword?: string; signature?: string | null }>(request);
+  const body = await readJson<{
+    currentPassword?: string;
+    newPassword?: string;
+    signature?: string | null;
+    fullName?: string;
+  }>(request);
   const changesSignature = Object.prototype.hasOwnProperty.call(body, "signature");
+  const changesFullName = Object.prototype.hasOwnProperty.call(body, "fullName");
   const newPassword = String(body.newPassword || "");
 
-  if (!changesSignature && !newPassword) throw new HttpError(400, "Không có thay đổi để lưu.");
+  if (!changesSignature && !changesFullName && !newPassword) throw new HttpError(400, "Không có thay đổi để lưu.");
   if (changesSignature && body.signature && !isSignatureDataUrl(body.signature)) {
     throw new HttpError(400, "Chữ ký mẫu không hợp lệ.");
   }
@@ -220,12 +316,12 @@ async function updateProfile(request: Request, env: Env, user: SessionUser): Pro
     }
     const salt = crypto.randomUUID();
     const passwordHash = await hashPassword(salt, newPassword);
+    const cleanup = passwordResetSessionCleanup(user.id, user.id, user.sessionId);
     try {
       await env.DB.batch([
         env.DB.prepare("UPDATE users SET password_salt = ?, password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
           .bind(salt, passwordHash, user.id),
-        env.DB.prepare("DELETE FROM user_sessions WHERE user_id = ? AND id <> ?")
-          .bind(user.id, user.sessionId),
+        env.DB.prepare(cleanup.sql).bind(...cleanup.bindings),
         env.DB.prepare(
           "INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, summary, payload) VALUES (?, ?, ?, ?, ?, ?)"
         ).bind(user.id, "update", "user", user.id, "Tự đổi mật khẩu", null)
@@ -236,6 +332,14 @@ async function updateProfile(request: Request, env: Env, user: SessionUser): Pro
     }
   }
 
+  if (changesFullName) {
+    const fullName = String(body.fullName || "").trim();
+    if (fullName.length > 120) throw new HttpError(400, "Họ và tên không được quá 120 ký tự.");
+    await env.DB.prepare("UPDATE users SET full_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+      .bind(fullName, user.id)
+      .run();
+  }
+
   if (changesSignature) {
     await env.DB.prepare("UPDATE users SET signature = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
       .bind(body.signature ?? null, user.id)
@@ -243,166 +347,228 @@ async function updateProfile(request: Request, env: Env, user: SessionUser): Pro
     await audit(env, user.id, "update", "user", user.id, body.signature ? "Cập nhật chữ ký mẫu" : "Xóa chữ ký mẫu");
   }
 
-  const updated = await env.DB.prepare(
-    `SELECT u.id, u.username, u.role, u.staff_id, s.name AS staff_name,
-            TRIM(COALESCE(s.family_middle_name, '') || ' ' || COALESCE(s.name, '')) AS staff_full_name, u.signature
-     FROM users u LEFT JOIN staff s ON s.id = u.staff_id WHERE u.id = ?`
-  ).bind(user.id).first<UserRow>();
+  const updated = await loadUserById(env, user.id);
   if (!updated) throw new HttpError(404, "Không tìm thấy tài khoản.");
-  return json({ user: publicUser(mapUserRow(updated)) });
+  return json({ user: publicUser(updated) });
 }
 
-async function listStaff(env: Env): Promise<Staff[]> {
+async function loadUserById(env: Env, id: number): Promise<User | null> {
+  const row = await env.DB.prepare(
+    `SELECT u.id, u.username, u.role, u.department_id, u.full_name, d.name AS department_name, u.signature
+     FROM users u LEFT JOIN departments d ON d.id = u.department_id WHERE u.id = ?`
+  ).bind(id).first<UserRow>();
+  return row ? mapUserRow(row) : null;
+}
+
+async function listDepartments(env: Env): Promise<Department[]> {
   const { results } = await env.DB.prepare(
-    "SELECT id, family_middle_name, name, type, active FROM staff ORDER BY active DESC, type, name"
-  ).all<StaffRow>();
-  return results.map(mapStaffRow);
+    "SELECT id, name, active, sort_order FROM departments ORDER BY active DESC, sort_order, name"
+  ).all<DepartmentRow>();
+  return results.map(mapDepartmentRow);
 }
 
-async function createStaff(request: Request, env: Env, user: User): Promise<Response> {
+async function createDepartment(request: Request, env: Env, user: User): Promise<Response> {
   requireAdmin(user);
-  const body = await readJson<{ familyMiddleName?: string; name?: string; type?: StaffType }>(request);
-  const familyMiddleName = String(body.familyMiddleName || "").trim();
+  const body = await readJson<{ name?: string }>(request);
   const name = String(body.name || "").trim();
-  const type = body.type;
-  if (!name || !isStaffType(type)) {
-    throw new HttpError(400, "Tên và loại nhân sự không hợp lệ.");
+  if (!name) throw new HttpError(400, "Tên khoa phòng không hợp lệ.");
+  if (name.length > 160) throw new HttpError(400, "Tên khoa phòng không được quá 160 ký tự.");
+
+  const duplicate = await env.DB.prepare("SELECT id FROM departments WHERE lower(name) = lower(?)").bind(name).first();
+  if (duplicate) throw new HttpError(409, "Khoa phòng này đã tồn tại.");
+
+  const maxOrder = await env.DB.prepare("SELECT COALESCE(MAX(sort_order), 0) AS value FROM departments")
+    .first<{ value: number }>();
+  const result = await env.DB.prepare("INSERT INTO departments (name, active, sort_order) VALUES (?, 1, ?)")
+    .bind(name, Number(maxOrder?.value || 0) + 10)
+    .run();
+  await audit(env, user.id, "create", "department", result.meta.last_row_id, `Thêm khoa phòng: ${name}`);
+  return json({ departments: await listDepartments(env) }, 201);
+}
+
+async function updateDepartment(request: Request, env: Env, user: User, id: number): Promise<Response> {
+  requireAdmin(user);
+  const body = await readJson<{ name?: string; active?: boolean; sortOrder?: number }>(request);
+  const current = await env.DB.prepare("SELECT id, name, active, sort_order FROM departments WHERE id = ?")
+    .bind(id)
+    .first<DepartmentRow>();
+  if (!current) throw new HttpError(404, "Không tìm thấy khoa phòng.");
+
+  const name = body.name === undefined ? current.name : String(body.name).trim();
+  if (!name) throw new HttpError(400, "Tên khoa phòng không hợp lệ.");
+  const active = body.active === undefined ? !!current.active : body.active;
+  const sortOrder = body.sortOrder === undefined ? current.sort_order : Number(body.sortOrder);
+  if (!Number.isInteger(sortOrder)) throw new HttpError(400, "Thứ tự khoa phòng không hợp lệ.");
+
+  if (name.toLowerCase() !== current.name.toLowerCase()) {
+    const duplicate = await env.DB.prepare("SELECT id FROM departments WHERE lower(name) = lower(?) AND id <> ?")
+      .bind(name, id)
+      .first();
+    if (duplicate) throw new HttpError(409, "Khoa phòng này đã tồn tại.");
   }
-  const result = await env.DB.prepare("INSERT INTO staff (family_middle_name, name, type, active) VALUES (?, ?, ?, 1)")
-    .bind(familyMiddleName, name, type)
-    .run();
-  await audit(env, user.id, "create", "staff", result.meta.last_row_id, `Thêm nhân sự ${type}: ${name}`);
-  return json({ staff: await listStaff(env) }, 201);
+
+  await env.DB.prepare(
+    "UPDATE departments SET name = ?, active = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+  ).bind(name, active ? 1 : 0, sortOrder, id).run();
+  await audit(env, user.id, "update", "department", id, `Cập nhật khoa phòng: ${name}`);
+  return json({ departments: await listDepartments(env) });
 }
 
-async function updateStaff(request: Request, env: Env, user: User, id: number): Promise<Response> {
+async function deleteDepartment(env: Env, user: User, id: number): Promise<Response> {
   requireAdmin(user);
-  const body = await readJson<{ familyMiddleName?: string; name?: string; type?: StaffType; active?: boolean }>(request);
-  const current = await getStaffById(env, id);
-  const familyMiddleName = String(body.familyMiddleName ?? current.familyMiddleName).trim();
-  const name = String(body.name ?? current.name).trim();
-  const type = body.type ?? current.type;
-  const active = body.active === undefined ? current.active : !!body.active;
-  if (!name || !isStaffType(type)) throw new HttpError(400, "Dữ liệu nhân sự không hợp lệ.");
-  await env.DB.prepare("UPDATE staff SET family_middle_name = ?, name = ?, type = ?, active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-    .bind(familyMiddleName, name, type, active ? 1 : 0, id)
-    .run();
-  await audit(env, user.id, "update", "staff", id, `Cập nhật nhân sự: ${name}`);
-  return json({ staff: await listStaff(env) });
+  const current = await env.DB.prepare("SELECT name FROM departments WHERE id = ?").bind(id).first<{ name: string }>();
+  if (!current) throw new HttpError(404, "Không tìm thấy khoa phòng.");
+  await env.DB.prepare("DELETE FROM departments WHERE id = ?").bind(id).run();
+  await audit(env, user.id, "delete", "department", id, `Xóa khoa phòng: ${current.name}`);
+  return json({ departments: await listDepartments(env) });
 }
 
-async function deleteStaff(env: Env, user: User, id: number): Promise<Response> {
-  requireAdmin(user);
-  const staff = await getStaffById(env, id);
-  await env.DB.prepare("DELETE FROM staff WHERE id = ?").bind(id).run();
-  await audit(env, user.id, "delete", "staff", id, `Xóa nhân sự: ${staff.name}`);
-  return json({ staff: await listStaff(env) });
-}
-
-async function listUsers(env: Env, user: User): Promise<Response> {
-  requireAdmin(user);
+async function listUsers(env: Env): Promise<User[]> {
   const { results } = await env.DB.prepare(
-    `SELECT u.id, u.username, u.role, u.staff_id, s.name AS staff_name, u.signature
-     FROM users u LEFT JOIN staff s ON s.id = u.staff_id
-     WHERE u.disabled = 0
-     ORDER BY u.username`
+    `SELECT u.id, u.username, u.role, u.department_id, u.full_name, d.name AS department_name, u.signature
+     FROM users u LEFT JOIN departments d ON d.id = u.department_id
+     ORDER BY u.role, u.username`
   ).all<UserRow>();
-  return json({ users: results.map(mapUserRow) });
+  return results.map(mapUserRow).map(publicUser);
+}
+
+async function listUsersEndpoint(env: Env, user: User): Promise<Response> {
+  requireAdmin(user);
+  return json({ users: await listUsers(env) });
 }
 
 async function createUser(request: Request, env: Env, user: User): Promise<Response> {
   requireAdmin(user);
-  const body = await readJson<{ username?: string; password?: string; role?: Role; staffId?: number | null; signature?: string | null }>(request);
+  const body = await readJson<{
+    username?: string;
+    password?: string;
+    role?: Role;
+    departmentId?: number | null;
+    fullName?: string;
+    signature?: string | null;
+  }>(request);
   const username = String(body.username || "").trim();
   const password = String(body.password || "");
   const role = body.role;
+  const fullName = String(body.fullName || "").trim();
   if (!username || password.length < 6 || !isRole(role)) {
-    throw new HttpError(400, "Tài khoản cần username, mật khẩu ít nhất 6 ký tự và role hợp lệ.");
+    throw new HttpError(400, "Tài khoản cần username, mật khẩu ít nhất 6 ký tự và vai trò hợp lệ.");
   }
   if (body.signature && !isSignatureDataUrl(body.signature)) throw new HttpError(400, "Chữ ký mẫu không hợp lệ.");
-  await assertUsernameAvailable(env, username);
-  const staffId = body.staffId ?? null;
-  if ((role === "bs" || role === "ktv" || role === "tkyk") && !staffId) {
-    throw new HttpError(400, "Tài khoản BS/KTV/TKYK cần chọn nhân sự liên kết.");
+  const departmentId = role === "khoa_phong" ? Number(body.departmentId || 0) : null;
+  if (role === "khoa_phong" && !departmentId) {
+    throw new HttpError(400, "Tài khoản khoa phòng cần chọn khoa phòng liên kết.");
   }
-  if (staffId) await assertStaffMatchesRole(env, staffId, role);
+  if (departmentId) await assertDepartmentExists(env, departmentId);
+  await assertUsernameAvailable(env, username);
+
   const salt = crypto.randomUUID();
   const passwordHash = await hashPassword(salt, password);
   const result = await env.DB.prepare(
-    "INSERT INTO users (username, password_salt, password_hash, role, staff_id, signature) VALUES (?, ?, ?, ?, ?, ?)"
-  ).bind(username, salt, passwordHash, role, staffId, body.signature || null).run();
-  await audit(env, user.id, "create", "user", result.meta.last_row_id, `Tạo tài khoản: ${username}`);
-  return listUsers(env, user);
-}
-
-export function passwordResetSessionCleanup(
-  actorId: number,
-  targetId: number,
-  currentSessionId: string
-): { sql: string; bindings: Array<number | string> } {
-  return actorId === targetId
-    ? {
-        sql: "DELETE FROM user_sessions WHERE user_id = ? AND id <> ?",
-        bindings: [targetId, currentSessionId]
-      }
-    : {
-        sql: "DELETE FROM user_sessions WHERE user_id = ?",
-        bindings: [targetId]
-      };
+    `INSERT INTO users (username, password_salt, password_hash, role, department_id, full_name, signature)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).bind(username, salt, passwordHash, role, departmentId, fullName, body.signature ?? null).run();
+  await audit(env, user.id, "create", "user", result.meta.last_row_id, `Tạo tài khoản ${roleLabel(role)}: ${username}`);
+  return json({ users: await listUsers(env) }, 201);
 }
 
 async function updateUser(request: Request, env: Env, user: SessionUser, id: number): Promise<Response> {
   requireAdmin(user);
-  const body = await readJson<{ username?: string; password?: string; role?: Role; staffId?: number | null; signature?: string | null }>(request);
-  const current = await env.DB.prepare("SELECT id, username, role, staff_id, signature FROM users WHERE id = ?").bind(id).first<UserRow>();
+  const body = await readJson<{
+    username?: string;
+    password?: string;
+    role?: Role;
+    departmentId?: number | null;
+    fullName?: string;
+    signature?: string | null;
+    disabled?: boolean;
+  }>(request);
+  const current = await env.DB.prepare(
+    "SELECT id, username, role, department_id, full_name FROM users WHERE id = ?"
+  ).bind(id).first<UserRow>();
   if (!current) throw new HttpError(404, "Không tìm thấy tài khoản.");
-  const username = String(body.username ?? current.username).trim();
-  const role = body.role ?? current.role;
-  const staffId = body.staffId === undefined ? current.staff_id : body.staffId;
-  const signature = body.signature === undefined ? current.signature : body.signature;
-  if (!username) throw new HttpError(400, "Username không hợp lệ.");
-  if (!isRole(role)) throw new HttpError(400, "Role không hợp lệ.");
-  if (signature && !isSignatureDataUrl(signature)) throw new HttpError(400, "Chữ ký mẫu không hợp lệ.");
-  await assertUsernameAvailable(env, username, id);
-  if (staffId) await assertStaffMatchesRole(env, staffId, role);
-  if ((role === "bs" || role === "ktv" || role === "tkyk") && !staffId) throw new HttpError(400, "Tài khoản BS/KTV/TKYK cần liên kết nhân sự.");
-  const statements: PostgresPreparedStatement[] = [
-    env.DB.prepare("UPDATE users SET username = ?, role = ?, staff_id = ?, signature = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-      .bind(username, role, staffId ?? null, signature ?? null, id)
-  ];
-  if (body.password) {
-    if (body.password.length < 6) throw new HttpError(400, "Mật khẩu mới cần ít nhất 6 ký tự.");
+
+  const changesSignature = Object.prototype.hasOwnProperty.call(body, "signature");
+  const onlySignature = changesSignature && body.username === undefined && body.role === undefined
+    && body.password === undefined && body.fullName === undefined && body.departmentId === undefined;
+
+  if (changesSignature) {
+    if (body.signature && !isSignatureDataUrl(body.signature)) throw new HttpError(400, "Chữ ký mẫu không hợp lệ.");
+    await env.DB.prepare("UPDATE users SET signature = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+      .bind(body.signature ?? null, id)
+      .run();
+    await audit(env, user.id, "update", "user", id, body.signature
+      ? `Cập nhật chữ ký mẫu của ${current.username}`
+      : `Xóa chữ ký mẫu của ${current.username}`);
+    if (onlySignature) return json({ users: await listUsers(env) });
+  }
+
+  if (body.password !== undefined) {
+    if (String(body.password).length < 6) throw new HttpError(400, "Mật khẩu mới cần ít nhất 6 ký tự.");
     const salt = crypto.randomUUID();
-    const passwordHash = await hashPassword(salt, body.password);
-    statements.push(
-      env.DB.prepare("UPDATE users SET password_salt = ?, password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .bind(salt, passwordHash, id)
-    );
+    const passwordHash = await hashPassword(salt, String(body.password));
     const cleanup = passwordResetSessionCleanup(user.id, id, user.sessionId);
-    statements.push(env.DB.prepare(cleanup.sql).bind(...cleanup.bindings));
+    await env.DB.batch([
+      env.DB.prepare("UPDATE users SET password_salt = ?, password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(salt, passwordHash, id),
+      env.DB.prepare(cleanup.sql).bind(...cleanup.bindings)
+    ]);
+    await audit(env, user.id, "update", "user", id, `Đổi mật khẩu tài khoản ${current.username}`);
+    if (body.username === undefined && body.role === undefined) return json({ users: await listUsers(env) });
   }
-  statements.push(
-    env.DB.prepare(
-      "INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, summary, payload) VALUES (?, ?, ?, ?, ?, ?)"
-    ).bind(user.id, "update", "user", id, `Cập nhật tài khoản: ${current.username}`, null)
-  );
-  try {
-    await env.DB.batch(statements);
-  } catch (error) {
-    console.error({ event: "admin_user_update_failed", actorUserId: user.id, targetUserId: id, error });
-    throw new HttpError(503, "Hệ thống tạm thời không thể cập nhật tài khoản. Vui lòng thử lại.");
+
+  const username = body.username === undefined ? current.username : String(body.username).trim();
+  const role = body.role === undefined ? current.role : body.role;
+  const fullName = body.fullName === undefined ? (current.full_name || "") : String(body.fullName).trim();
+  if (!username) throw new HttpError(400, "Username không hợp lệ.");
+  if (!isRole(role)) throw new HttpError(400, "Vai trò không hợp lệ.");
+  const departmentId = role === "khoa_phong"
+    ? Number((body.departmentId === undefined ? current.department_id : body.departmentId) || 0)
+    : null;
+  if (role === "khoa_phong" && !departmentId) {
+    throw new HttpError(400, "Tài khoản khoa phòng cần chọn khoa phòng liên kết.");
   }
-  return listUsers(env, user);
+  if (departmentId) await assertDepartmentExists(env, departmentId);
+  if (username.toLowerCase() !== current.username.toLowerCase()) await assertUsernameAvailable(env, username, id);
+  if (current.role === "admin" && role !== "admin") await assertAnotherAdminExists(env, id);
+
+  await env.DB.prepare(
+    `UPDATE users SET username = ?, role = ?, department_id = ?, full_name = ?,
+     disabled = COALESCE(?, disabled), updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+  ).bind(username, role, departmentId, fullName, body.disabled === undefined ? null : (body.disabled ? 1 : 0), id).run();
+  await audit(env, user.id, "update", "user", id, `Cập nhật tài khoản ${username} (${roleLabel(role)})`);
+  return json({ users: await listUsers(env) });
 }
 
 async function deleteUser(env: Env, user: User, id: number): Promise<Response> {
   requireAdmin(user);
   if (user.id === id) throw new HttpError(400, "Không thể xóa tài khoản đang đăng nhập.");
-  const current = await env.DB.prepare("SELECT id, username FROM users WHERE id = ?").bind(id).first<{ id: number; username: string }>();
+  const current = await env.DB.prepare("SELECT username, role FROM users WHERE id = ?")
+    .bind(id)
+    .first<{ username: string; role: Role }>();
   if (!current) throw new HttpError(404, "Không tìm thấy tài khoản.");
+  if (current.role === "admin") await assertAnotherAdminExists(env, id);
   await env.DB.prepare("DELETE FROM users WHERE id = ?").bind(id).run();
-  await audit(env, user.id, "delete", "user", id, `Xóa tài khoản: ${current.username}`);
-  return listUsers(env, user);
+  await audit(env, user.id, "delete", "user", id, `Xóa tài khoản ${current.username}`);
+  return json({ users: await listUsers(env) });
+}
+
+async function assertAnotherAdminExists(env: Env, exceptUserId: number): Promise<void> {
+  const other = await env.DB.prepare(
+    "SELECT id FROM users WHERE role = 'admin' AND disabled = 0 AND id <> ? LIMIT 1"
+  ).bind(exceptUserId).first();
+  if (!other) throw new HttpError(400, "Hệ thống cần giữ lại ít nhất một tài khoản quản lý.");
+}
+
+async function assertDepartmentExists(env: Env, departmentId: number): Promise<void> {
+  const row = await env.DB.prepare("SELECT id FROM departments WHERE id = ?").bind(departmentId).first();
+  if (!row) throw new HttpError(404, "Không tìm thấy khoa phòng liên kết.");
+}
+
+async function assertUsernameAvailable(env: Env, username: string, exceptUserId?: number): Promise<void> {
+  const lookup = usernameAvailabilityLookup(username, exceptUserId);
+  const existing = await env.DB.prepare(lookup.sql).bind(...lookup.bindings).first();
+  if (existing) throw new HttpError(409, "Username đã tồn tại.");
 }
 
 async function getNotifications(env: Env, user: User): Promise<Response> {
@@ -437,1176 +603,894 @@ async function markNotificationsRead(request: Request, env: Env, user: User): Pr
 }
 
 async function listNotifications(env: Env, user: User): Promise<Array<Omit<NotificationItem, "read">>> {
-  const notifications: Array<Omit<NotificationItem, "read">> = [];
+  const today = todayInVietnam();
+  const horizon = addDays(today, 45);
+  const backlog = addDays(today, -30);
+  const items: Array<Omit<NotificationItem, "read">> = [];
 
-  if (user.staffId) {
-    const { results: swaps } = await env.DB.prepare(
-      `SELECT sr.id, sr.token, sr.created_at, sr.staff_id_1, sr.staff_id_2,
-              creator.staff_id AS creator_staff_id,
-              s1.name AS staff_name_1, s2.name AS staff_name_2,
-              sr.date_1, sr.date_2
-       FROM swap_requests sr
-       LEFT JOIN users creator ON creator.id = sr.created_by
-       JOIN staff s1 ON s1.id = sr.staff_id_1
-       JOIN staff s2 ON s2.id = sr.staff_id_2
-       WHERE sr.status = 'pending'
-         AND (sr.expires_at IS NULL OR sr.expires_at > CURRENT_TIMESTAMP)
-         AND (sr.staff_id_1 = ? OR sr.staff_id_2 = ?)
-       ORDER BY sr.created_at DESC
-       LIMIT 20`
-    ).bind(user.staffId, user.staffId).all<{
-      id: number; token: string; created_at: string;
-      staff_id_1: number; staff_id_2: number; creator_staff_id: number | null;
-      staff_name_1: string; staff_name_2: string; date_1: string; date_2: string;
-    }>();
-
-    for (const row of swaps) {
-      const recipientId = row.creator_staff_id === row.staff_id_1
-        ? row.staff_id_2
-        : row.creator_staff_id === row.staff_id_2
-          ? row.staff_id_1
-          : null;
-      const isRecipient = recipientId === user.staffId;
-      notifications.push({
-        id: `swap-${row.id}`,
-        type: "swap",
-        title: isRecipient ? "Yêu cầu đổi trực" : "Đổi trực đang chờ xác nhận",
-        message: `${row.staff_name_1} (${formatDate(row.date_1)}) ↔ ${row.staff_name_2} (${formatDate(row.date_2)})`,
-        createdAt: row.created_at,
-        ...(isRecipient ? { swapToken: row.token } : { actionView: "schedule" as const })
+  if (user.role === "khoa_phong" && user.departmentId) {
+    const { results: missing } = await env.DB.prepare(
+      `SELECT a.date, w.session
+       FROM assignments a
+       JOIN work_days w ON w.date = a.date
+       WHERE a.department_id = ? AND a.date BETWEEN ? AND ? AND TRIM(a.person_name) = ''
+       ORDER BY a.date`
+    ).bind(user.departmentId, today, horizon).all<{ date: string; session: DaySession }>();
+    for (const row of missing) {
+      items.push({
+        id: `person:${user.departmentId}:${row.date}`,
+        type: "person",
+        title: "Chưa điền người làm việc",
+        message: `Ngày ${formatFullDate(row.date)} (${sessionLabel(row.session)}) chưa có họ tên và số điện thoại người làm việc.`,
+        createdAt: `${row.date}T00:00:00Z`,
+        actionView: "schedule",
+        actionDate: row.date
       });
     }
-  }
 
-  if (user.role === "admin") {
-    const { results: leaves } = await env.DB.prepare(
-      `SELECT lr.id, lr.created_at, s.name AS staff_name, STRING_AGG(ld.date::text, ',') AS dates
-       FROM leave_requests lr
-       JOIN staff s ON s.id = lr.staff_id
-       JOIN leave_days ld ON ld.request_id = lr.id
-       WHERE lr.status = 'pending'
-       GROUP BY lr.id, lr.created_at, s.name
-       ORDER BY lr.created_at DESC
-       LIMIT 20`
-    ).all<{ id: number; created_at: string; staff_name: string; dates: string }>();
-    for (const row of leaves) {
-      const dates = row.dates.split(",").sort().map(formatDate).join(", ");
-      notifications.push({
-        id: `leave-pending-${row.id}`,
-        type: "leave",
-        title: "Nghỉ phép chờ duyệt",
-        message: `${row.staff_name}: ${dates}`,
-        createdAt: row.created_at,
-        actionView: "leave"
-      });
-    }
-  } else if (user.staffId) {
-    const { results: leaves } = await env.DB.prepare(
-      `SELECT lr.id, lr.status, lr.decision, lr.updated_at, lr.decided_at, lr.reason,
-              lr.requested_dates, STRING_AGG(ld.date::text, ',') AS active_dates
-       FROM leave_requests lr
-       LEFT JOIN leave_days ld ON ld.request_id = lr.id
-       WHERE lr.staff_id = ?
-         AND (
-           lr.status = 'pending'
-           OR (lr.status = 'approved' AND EXISTS (
-             SELECT 1 FROM leave_days upcoming
-             WHERE upcoming.request_id = lr.id
-               AND upcoming.date >= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
-           ))
-           OR (lr.decision IN ('approved', 'rejected') AND lr.decided_at >= CURRENT_TIMESTAMP - INTERVAL '30 days')
-         )
-       GROUP BY lr.id, lr.status, lr.decision, lr.updated_at, lr.decided_at, lr.reason, lr.requested_dates
-       ORDER BY lr.updated_at DESC
-       LIMIT 10`
-    ).bind(user.staffId).all<{
-      id: number; status: string; decision: string | null; updated_at: string; decided_at: string | null;
-      reason: string | null; requested_dates: string | null; active_dates: string | null;
-    }>();
-    for (const row of leaves) {
-      const dates = (row.requested_dates || row.active_dates || "").split(",").filter(Boolean).sort();
-      const range = dates.length <= 1
-        ? formatDate(dates[0] || "")
-        : `${formatDate(dates[0])} – ${formatDate(dates[dates.length - 1])}`;
-      const state = row.status === "pending" ? "pending" : row.decision || row.status;
-      const title = state === "pending"
-        ? "Nghỉ phép đang chờ duyệt"
-        : state === "rejected"
-          ? "Nghỉ phép đã bị từ chối"
-          : "Nghỉ phép đã được duyệt";
-      notifications.push({
-        id: `leave-${row.id}-${state}-${row.updated_at}`,
-        type: "leave",
-        title,
-        message: row.reason ? `${range} · ${row.reason}` : range,
-        createdAt: row.decided_at || row.updated_at,
-        actionView: "leave"
-      });
-    }
-  }
-
-  const reportRole = user.role === "bs" ? "bs" : user.role === "ktv" ? "ktv" : user.role === "admin" ? "lanhdao" : null;
-  if (reportRole) {
-    const signatureColumn = reportRole === "bs" ? "signature_bs" : reportRole === "ktv" ? "signature_ktv" : "signature_lanhdao";
-    const userIdColumn = reportRole === "bs" ? "signature_bs_user_id" : reportRole === "ktv" ? "signature_ktv_user_id" : "signature_lanhdao_user_id";
-    const dutyFilter = reportRole === "lanhdao"
-      ? "1 = 1"
-      : `EXISTS (
-          SELECT 1 FROM schedule_assignments sa
-          JOIN schedule_units su ON su.id = sa.unit_id
-          WHERE sa.date = dr.date AND sa.staff_id = ? AND su.type = ?
-        )`;
-    const reportStatement = env.DB.prepare(
-      `SELECT dr.date, dr.updated_at
-       FROM duty_reports dr
-       WHERE dr.date <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
-         AND dr.date >= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Ho_Chi_Minh')::date - 30
-         AND dr.${signatureColumn} IS NULL
-         AND dr.${userIdColumn} IS NULL
-         AND ${dutyFilter}
-       ORDER BY dr.date DESC
-       LIMIT 20`
-    );
-    const reportResult = reportRole === "lanhdao"
-      ? await reportStatement.all<{ date: string; updated_at: string }>()
-      : await reportStatement.bind(user.staffId, reportRole === "bs" ? "duty_bs" : "duty_ktv").all<{ date: string; updated_at: string }>();
-    for (const row of reportResult.results) {
-      notifications.push({
-        id: `report-${reportRole}-${row.date}`,
+    const { results: unsigned } = await env.DB.prepare(
+      `SELECT a.date
+       FROM assignments a
+       JOIN work_reports r ON r.date = a.date
+       LEFT JOIN work_report_attendance att ON att.date = a.date AND att.department_id = a.department_id
+       WHERE a.department_id = ? AND a.date BETWEEN ? AND ? AND att.signature IS NULL
+       ORDER BY a.date DESC`
+    ).bind(user.departmentId, backlog, today).all<{ date: string }>();
+    for (const row of unsigned) {
+      items.push({
+        id: `report:${user.departmentId}:${row.date}`,
         type: "report",
-        title: "Báo cáo trực chưa ký",
-        message: `Báo cáo ngày ${formatDate(row.date)} đang chờ chữ ký ${reportRole === "lanhdao" ? "Lãnh đạo" : reportRole.toUpperCase()}.`,
-        createdAt: row.updated_at,
+        title: "Chưa ký báo cáo làm việc",
+        message: `Báo cáo làm việc ngày ${formatFullDate(row.date)} đang chờ khoa phòng điểm danh và ký tên.`,
+        createdAt: `${row.date}T00:00:00Z`,
         actionView: "report",
         actionDate: row.date
       });
     }
   }
 
-  notifications.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return notifications.slice(0, 30);
+  if (user.role === "dieu_phoi") {
+    const { results: swaps } = await env.DB.prepare(
+      `SELECT s.token, s.date_1, s.date_2, s.created_at,
+              COALESCE(NULLIF(TRIM(u1.full_name), ''), u1.username) AS name_1
+       FROM swap_requests s
+       JOIN users u1 ON u1.id = s.user_id_1
+       WHERE s.status = 'pending' AND s.user_id_2 = ?
+         AND (s.expires_at IS NULL OR s.expires_at > CURRENT_TIMESTAMP)
+       ORDER BY s.created_at DESC`
+    ).bind(user.id).all<{ token: string; date_1: string; date_2: string; created_at: string; name_1: string }>();
+    for (const row of swaps) {
+      items.push({
+        id: `swap:${row.token}`,
+        type: "swap",
+        title: "Yêu cầu đổi ngày làm",
+        message: `${row.name_1} muốn đổi ngày ${formatFullDate(row.date_1)} với ngày ${formatFullDate(row.date_2)} của bạn.`,
+        createdAt: row.created_at,
+        actionView: "schedule",
+        actionDate: row.date_2,
+        swapToken: row.token
+      });
+    }
+  }
+
+  if (canManageSchedule(user.role)) {
+    const { results: pendingPersons } = await env.DB.prepare(
+      `SELECT a.date, COUNT(*) AS missing_count
+       FROM assignments a
+       WHERE a.date BETWEEN ? AND ? AND TRIM(a.person_name) = ''
+       GROUP BY a.date
+       ORDER BY a.date`
+    ).bind(today, horizon).all<{ date: string; missing_count: number }>();
+    for (const row of pendingPersons) {
+      items.push({
+        id: `pending-person:${row.date}`,
+        type: "person",
+        title: "Khoa phòng chưa điền người",
+        message: `Ngày ${formatFullDate(row.date)} còn ${row.missing_count} khoa phòng chưa điền người làm việc.`,
+        createdAt: `${row.date}T00:00:00Z`,
+        actionView: "schedule",
+        actionDate: row.date
+      });
+    }
+
+    const { results: missingReports } = await env.DB.prepare(
+      `SELECT w.date
+       FROM work_days w
+       LEFT JOIN work_reports r ON r.date = w.date
+       WHERE w.date BETWEEN ? AND ? AND r.date IS NULL
+       ORDER BY w.date DESC`
+    ).bind(backlog, today).all<{ date: string }>();
+    for (const row of missingReports) {
+      items.push({
+        id: `missing-report:${row.date}`,
+        type: "report",
+        title: "Chưa có báo cáo làm việc",
+        message: `Ngày làm ${formatFullDate(row.date)} chưa có báo cáo làm việc.`,
+        createdAt: `${row.date}T00:00:00Z`,
+        actionView: "report",
+        actionDate: row.date
+      });
+    }
+  }
+
+  return items.sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 60);
 }
 
 async function getSchedule(env: Env, url: URL, user: User): Promise<Response> {
-  const weekStart = normalizeWeekStart(url.searchParams.get("weekStart"));
-  const days = getWeekDays(weekStart);
-  const nextWeekDays = getWeekDays(addDays(weekStart, 7));
-  const [year, month] = weekStart.split("-").map(Number);
-  const monthStart = `${year}-${String(month).padStart(2, "0")}-01`;
-  const monthEnd = `${year}-${String(month).padStart(2, "0")}-${String(new Date(Date.UTC(year, month, 0)).getUTCDate()).padStart(2, "0")}`;
+  const month = normalizeMonth(url.searchParams.get("month"));
+  const { from, to } = monthRange(month);
   const settings = await getSettings(env);
-  const canViewMonthCalendar = user.role === "admin" || settings.show_leave_month_calendar;
-  const [units, staff, assignments, leaveDays, nextWeekLeaveDays, monthLeaveDays, auditLogs, rotations, pendingLeaves] = await Promise.all([
-    listUnits(env),
-    listStaff(env),
-    listAssignments(env, days),
-    listLeaveDays(env, days),
-    listLeaveDays(env, nextWeekDays),
-    canViewMonthCalendar ? listLeaveDays(env, [monthStart, monthEnd], true) : Promise.resolve([]),
-    listAuditLogs(env, weekStart, days[6], auditFiltersForUser(user)),
-    listRotations(env),
-    listPendingLeaves(env, days, user)
-  ]);
-  const visibleLeaveDays = (items: LeaveDay[]) => user.role === "admin"
-    ? items
-    : items.map((day) => ({ ...day, reason: day.staffId === user.staffId ? day.reason : null }));
+  const [workDays, departments, assignments, coordinators, coordinatorAssignments, rotation, auditLogs] =
+    await Promise.all([
+      listWorkDays(env, from, to),
+      listDepartments(env),
+      listAssignments(env, from, to),
+      listCoordinators(env),
+      listCoordinatorAssignments(env, from, to),
+      loadRotation(env),
+      listAuditLogs(env, from, to, auditFiltersForUser(user))
+    ]);
+
   const response: ScheduleResponse = {
-    weekStart,
-    days,
-    units,
-    staff,
+    month,
+    workDays,
+    departments,
     assignments,
-    leaveDays: visibleLeaveDays(leaveDays),
-    nextWeekLeaveDays: visibleLeaveDays(nextWeekLeaveDays),
-    monthLeaveDays: visibleLeaveDays(monthLeaveDays),
+    coordinators,
+    coordinatorAssignments,
+    rotation,
     auditLogs,
-    rotations,
-    pendingLeaves,
-    approveLeaveBs: settings.approve_leave_bs,
-    approveLeaveKtv: settings.approve_leave_ktv,
-    approveSwap: settings.approve_swap,
-    showStaffRail: settings.show_staff_rail,
-    showLeaveMonthCalendar: settings.show_leave_month_calendar
+    lockPersonOnWorkDay: settings.lock_person_on_workday
   };
   return json(response);
 }
 
-async function getLeaveMonth(env: Env, url: URL, user: User): Promise<Response> {
-  const value = url.searchParams.get("month") || "";
-  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(value)) {
-    throw new HttpError(400, "Tháng không hợp lệ.");
-  }
-  const settings = await getSettings(env);
-  if (user.role !== "admin" && !settings.show_leave_month_calendar) {
-    throw new HttpError(403, "Lịch phép tháng chưa được bật.");
-  }
-  const [year, month] = value.split("-").map(Number);
-  const monthStart = `${value}-01`;
-  const monthEnd = `${value}-${String(new Date(Date.UTC(year, month, 0)).getUTCDate()).padStart(2, "0")}`;
-  const leaveDays = await listLeaveDays(env, [monthStart, monthEnd], true);
-  return json({
-    month: value,
-    leaveDays: user.role === "admin"
-      ? leaveDays
-      : leaveDays.map((day) => ({ ...day, reason: day.staffId === user.staffId ? day.reason : null }))
-  });
+async function listWorkDays(env: Env, from: string, to: string): Promise<WorkDay[]> {
+  const { results } = await env.DB.prepare(
+    "SELECT date, session, note FROM work_days WHERE date BETWEEN ? AND ? ORDER BY date"
+  ).bind(from, to).all<WorkDayRow>();
+  return results.map(mapWorkDayRow);
+}
+
+async function listAssignments(env: Env, from: string, to: string): Promise<Assignment[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT a.id, a.date, a.department_id, d.name AS department_name, a.person_name, a.person_phone, a.updated_at
+     FROM assignments a
+     JOIN departments d ON d.id = a.department_id
+     WHERE a.date BETWEEN ? AND ?
+     ORDER BY a.date, a.member_order, d.sort_order, d.name`
+  ).bind(from, to).all<AssignmentRow>();
+  return results.map(mapAssignmentRow);
+}
+
+async function createWorkDay(request: Request, env: Env, user: User): Promise<Response> {
+  requireScheduler(user);
+  const body = await readJson<{ date?: string; session?: DaySession; note?: string }>(request);
+  const date = String(body.date || "").slice(0, 10);
+  const session = body.session;
+  if (!isIsoDate(date)) throw new HttpError(400, "Ngày làm không hợp lệ.");
+  if (!isDaySession(session)) throw new HttpError(400, "Buổi làm việc không hợp lệ.");
+  const note = String(body.note || "").trim() || null;
+  if (note && note.length > 300) throw new HttpError(400, "Ghi chú không được quá 300 ký tự.");
+
+  const result = await env.DB.prepare(
+    `INSERT INTO work_days (date, session, note, created_by) VALUES (?, ?, ?, ?)
+     ON CONFLICT (date) DO NOTHING`
+  ).bind(date, session, note, user.id).run();
+  if ((result.meta.changes || 0) === 0) throw new HttpError(409, `Ngày ${formatFullDate(date)} đã có trong lịch làm việc.`);
+
+  await audit(env, user.id, "create", "work_day", null, `Thêm ngày làm ${formatFullDate(date)} (${sessionLabel(session)})`);
+  return json({ ok: true }, 201);
+}
+
+async function updateWorkDay(request: Request, env: Env, user: User, date: string): Promise<Response> {
+  requireScheduler(user);
+  if (!isIsoDate(date)) throw new HttpError(400, "Ngày làm không hợp lệ.");
+  const body = await readJson<{ session?: DaySession; note?: string | null }>(request);
+  const current = await env.DB.prepare("SELECT date, session, note FROM work_days WHERE date = ?")
+    .bind(date)
+    .first<WorkDayRow>();
+  if (!current) throw new HttpError(404, "Không tìm thấy ngày làm.");
+
+  const session = body.session === undefined ? current.session : body.session;
+  if (!isDaySession(session)) throw new HttpError(400, "Buổi làm việc không hợp lệ.");
+  const note = body.note === undefined ? current.note : (String(body.note || "").trim() || null);
+  if (note && note.length > 300) throw new HttpError(400, "Ghi chú không được quá 300 ký tự.");
+
+  await env.DB.prepare("UPDATE work_days SET session = ?, note = ?, updated_at = CURRENT_TIMESTAMP WHERE date = ?")
+    .bind(session, note, date)
+    .run();
+  await audit(env, user.id, "update", "work_day", null, `Sửa ngày làm ${formatFullDate(date)} (${sessionLabel(session)})`);
+  return json({ ok: true });
+}
+
+async function deleteWorkDay(env: Env, user: User, date: string): Promise<Response> {
+  requireScheduler(user);
+  if (!isIsoDate(date)) throw new HttpError(400, "Ngày làm không hợp lệ.");
+  const result = await env.DB.prepare("DELETE FROM work_days WHERE date = ?").bind(date).run();
+  if ((result.meta.changes || 0) === 0) throw new HttpError(404, "Không tìm thấy ngày làm.");
+  await audit(env, user.id, "delete", "work_day", null, `Xóa ngày làm ${formatFullDate(date)}`);
+  return json({ ok: true });
 }
 
 async function putAssignment(request: Request, env: Env, user: User): Promise<Response> {
-  requireAdmin(user);
-  const body = await readJson<{ unitId?: number; date?: string; staffId?: number; slot?: number }>(request);
-  if (!body.unitId || !body.date || !body.staffId) throw new HttpError(400, "Thiếu hàng lịch, ngày hoặc nhân sự.");
-  const unit = await getUnitById(env, body.unitId);
-  const staff = await getStaffById(env, body.staffId);
-  const dayWindow = [body.date];
-  const assignments = await listAssignments(env, dayWindow);
-  const leaveDays = await listLeaveDays(env, dayWindow);
-  const message = validateAssignmentInput({ unit, staff, date: body.date, assignments, leaveDays });
+  requireScheduler(user);
+  const body = await readJson<{ date?: string; departmentId?: number; personName?: string; personPhone?: string }>(request);
+  const date = String(body.date || "").slice(0, 10);
+  const departmentId = Number(body.departmentId || 0);
+  if (!isIsoDate(date) || !departmentId) throw new HttpError(400, "Thiếu ngày làm hoặc khoa phòng.");
+
+  const department = await getDepartmentById(env, departmentId);
+  const workDays = await listWorkDays(env, date, date);
+  const assignments = await listAssignments(env, date, date);
+  const message = validateAssignmentInput({
+    department,
+    date,
+    workDayDates: workDays.map((workDay) => workDay.date),
+    assignments
+  });
   if (message) throw new HttpError(400, message);
-  const slot = body.slot ?? nextSlot(assignments, unit.id, body.date);
-  await env.DB.prepare(
-    `INSERT INTO schedule_assignments (unit_id, date, staff_id, slot, created_by, updated_by)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(unit_id, date, slot) DO UPDATE SET
-       staff_id = excluded.staff_id,
-       updated_by = excluded.updated_by,
-       updated_at = CURRENT_TIMESTAMP,
-       confirmed = 0`
-  ).bind(unit.id, body.date, staff.id, slot, user.id, user.id).run();
-  await audit(env, user.id, "upsert", "assignment", unit.id, `${unit.label} ${body.date}: ${staff.name}`);
+
+  const personName = String(body.personName || "").trim();
+  const personPhone = normalizePhone(body.personPhone);
+  const memberOrder = assignments.filter((assignment) => assignment.date === date).length;
+
+  const result = await env.DB.prepare(
+    `INSERT INTO assignments (date, department_id, person_name, person_phone, member_order, created_by, updated_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).bind(date, departmentId, personName, personPhone, memberOrder, user.id, user.id).run();
+  await audit(
+    env,
+    user.id,
+    "create",
+    "assignment",
+    result.meta.last_row_id,
+    `Phân công ${department.name} ngày ${formatFullDate(date)}`
+  );
+  return json({ ok: true }, 201);
+}
+
+async function updateAssignmentPerson(request: Request, env: Env, user: User, id: number): Promise<Response> {
+  const body = await readJson<{ personName?: string; personPhone?: string }>(request);
+  const message = validatePersonInput({ personName: body.personName, personPhone: body.personPhone });
+  if (message) throw new HttpError(400, message);
+
+  const current = await env.DB.prepare(
+    `SELECT a.id, a.date, a.department_id, d.name AS department_name, a.person_name
+     FROM assignments a JOIN departments d ON d.id = a.department_id WHERE a.id = ?`
+  ).bind(id).first<{ id: number; date: string; department_id: number; department_name: string; person_name: string }>();
+  if (!current) throw new HttpError(404, "Không tìm thấy phân công.");
+
+  const settings = await getSettings(env);
+  const today = todayInVietnam();
+  if (!canManageSchedule(user.role)) {
+    if (user.departmentId !== current.department_id) {
+      throw new HttpError(403, "Chỉ khoa phòng được phân công mới được điền người làm việc.");
+    }
+    if (!canEditPersonOnDate(current.date, today, settings.lock_person_on_workday)) {
+      throw new HttpError(403, `Ngày ${formatFullDate(current.date)} đã qua nên không sửa được người làm việc.`);
+    }
+  }
+
+  const personName = String(body.personName || "").trim();
+  const personPhone = normalizePhone(body.personPhone);
+  const update = assignmentPersonUpdate({
+    assignmentId: id,
+    role: user.role,
+    departmentId: user.departmentId,
+    userId: user.id,
+    personName,
+    personPhone,
+    today,
+    lockOnWorkDay: settings.lock_person_on_workday
+  });
+  const result = await env.DB.prepare(update.sql).bind(...update.bindings).run();
+  if ((result.meta.changes || 0) !== 1) throw new HttpError(409, "Không cập nhật được người làm việc. Vui lòng tải lại.");
+
+  const action = current.person_name.trim() ? "update_person" : "fill_person";
+  await audit(
+    env,
+    user.id,
+    action,
+    "assignment",
+    id,
+    `${current.department_name} ngày ${formatFullDate(current.date)}: ${personName} - ${personPhone}`
+  );
   return json({ ok: true });
 }
 
 async function moveAssignment(request: Request, env: Env, user: User, id: number): Promise<Response> {
-  const body = await readJson<{ unitId?: number; date?: string; slot?: number }>(request);
-  if (!body.unitId || !body.date) throw new HttpError(400, "Thiếu hàng lịch hoặc ngày đích.");
+  requireScheduler(user);
+  const body = await readJson<{ date?: string }>(request);
+  const date = String(body.date || "").slice(0, 10);
+  if (!isIsoDate(date)) throw new HttpError(400, "Thiếu ngày làm đích.");
+
   const current = await env.DB.prepare(
-    `SELECT a.id, a.staff_id, a.unit_id, a.date, a.slot, s.name AS staff_name
-     FROM schedule_assignments a JOIN staff s ON s.id = a.staff_id
-     WHERE a.id = ?`
-  ).bind(id).first<{ id: number; staff_id: number; unit_id: number; date: string; slot: number; staff_name: string }>();
+    `SELECT a.id, a.date, a.department_id, d.name AS department_name
+     FROM assignments a JOIN departments d ON d.id = a.department_id WHERE a.id = ?`
+  ).bind(id).first<{ id: number; date: string; department_id: number; department_name: string }>();
   if (!current) throw new HttpError(404, "Không tìm thấy phân công.");
-  const unit = await getUnitById(env, body.unitId);
-  const staff = await getStaffById(env, current.staff_id);
-  const assignments = await listAssignments(env, [body.date]);
-  const leaveDays = await listLeaveDays(env, [body.date]);
-  const targetAssignments = assignments
-    .filter((assignment) => assignment.unitId === unit.id && assignment.date === body.date && assignment.id !== id)
-    .sort((a, b) => a.slot - b.slot);
-  const fullTarget = unit.maxPerDay !== null && targetAssignments.length >= unit.maxPerDay;
-  const targetSlot = body.slot ?? (fullTarget ? targetAssignments[0]?.slot ?? 0 : nextSlot(assignments, unit.id, body.date));
-  const swapAssignmentId = fullTarget ? targetAssignments.find((assignment) => assignment.slot === targetSlot)?.id ?? targetAssignments[0]?.id : null;
+  if (current.date === date) return json({ ok: true });
+
+  const department = await getDepartmentById(env, current.department_id);
+  const workDays = await listWorkDays(env, date, date);
+  const assignments = await listAssignments(env, date, date);
   const message = validateAssignmentInput({
-    unit,
-    staff,
-    date: body.date,
-    assignments: swapAssignmentId ? assignments.filter((assignment) => assignment.id !== swapAssignmentId) : assignments,
-    leaveDays,
+    department,
+    date,
+    workDayDates: workDays.map((workDay) => workDay.date),
+    assignments,
     replacingAssignmentId: id
   });
   if (message) throw new HttpError(400, message);
-  const occupant = await env.DB.prepare(
-    "SELECT id, staff_id, unit_id, date, slot FROM schedule_assignments WHERE unit_id = ? AND date = ? AND slot = ? AND id <> ?"
-  ).bind(unit.id, body.date, targetSlot, id).first<{ id: number; staff_id: number; unit_id: number; date: string; slot: number }>();
-  if (occupant) {
-    const sourceUnit = await getUnitById(env, current.unit_id);
-    const occupantStaff = await getStaffById(env, occupant.staff_id);
-    const sourceAssignments = await listAssignments(env, [current.date]);
-    const sourceLeaveDays = await listLeaveDays(env, [current.date]);
-    const occupantMessage = validateAssignmentInput({
-      unit: sourceUnit,
-      staff: occupantStaff,
-      date: current.date,
-      assignments: sourceAssignments.filter((assignment) => assignment.id !== id),
-      leaveDays: sourceLeaveDays,
-      replacingAssignmentId: occupant.id
-    });
-    if (occupantMessage) throw new HttpError(400, occupantMessage);
-  }
-  if (user.role !== "admin") {
-    if (!user.staffId) throw new HttpError(403, "Tài khoản chưa liên kết nhân sự.");
-    if (!occupant) throw new HttpError(403, "Tài khoản BS/KTV chỉ được đổi lịch với người khác, không được chuyển vào ô trống.");
-    const involvesSelf = current.staff_id === user.staffId || occupant.staff_id === user.staffId;
-    if (!involvesSelf) throw new HttpError(403, "Bạn chỉ được đổi lịch có đúng tên mình, không được đổi giữa hai người khác.");
-  }
 
-  // Swap approval check
-  const settings = await getSettings(env);
-  const isSwap = occupant && occupant.staff_id !== current.staff_id;
-  const needApproval = settings.approve_swap && user.role !== "admin" && isSwap;
-
-  if (needApproval && occupant) {
-    const token = crypto.randomUUID();
-    const expiresAt = new Date(Date.now() + 7 * 86400000).toISOString();
-    await env.DB.prepare(
-      `INSERT INTO swap_requests (
-        token, status, created_by, expires_at,
-        assignment_id_1, staff_id_1, unit_id_1, date_1, slot_1,
-        assignment_id_2, staff_id_2, unit_id_2, date_2, slot_2
-      ) VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(
-      token,
-      user.id,
-      expiresAt,
-      current.id,
-      current.staff_id,
-      current.unit_id,
-      current.date,
-      current.slot,
-      occupant.id,
-      occupant.staff_id,
-      occupant.unit_id,
-      occupant.date,
-      occupant.slot
-    ).run();
-
-    return json({
-      pending: true,
-      token,
-      message: "Yêu cầu đổi trực đã được tạo. Vui lòng gửi link sau cho đối phương đồng ý."
-    });
-  }
-
-  const moveStatements: PostgresPreparedStatement[] = [];
-  if (occupant) {
-    moveStatements.push(env.DB.prepare(
-      "UPDATE schedule_assignments SET slot = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP, confirmed = 0 WHERE id = ?"
-    ).bind(-100000 - occupant.id, user.id, occupant.id));
-  }
-  moveStatements.push(env.DB.prepare(
-    "UPDATE schedule_assignments SET unit_id = ?, date = ?, slot = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP, confirmed = 0 WHERE id = ?"
-  ).bind(unit.id, body.date, targetSlot, user.id, id));
-  if (occupant) {
-    moveStatements.push(env.DB.prepare(
-      "UPDATE schedule_assignments SET unit_id = ?, date = ?, slot = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP, confirmed = 0 WHERE id = ?"
-    ).bind(current.unit_id, current.date, current.slot, user.id, occupant.id));
-  }
-  await env.DB.batch(moveStatements);
-  if (occupant) {
-    await syncWorkScheduleAfterDutySwap(env, {
-      staffId1: current.staff_id,
-      dutyDate1: current.date,
-      staffId2: occupant.staff_id,
-      dutyDate2: occupant.date,
-      updatedBy: user.id
-    });
-  }
-  const dowCurrent = getDayOfWeekLabel(current.date);
-  const formattedDateCurrent = formatDate(current.date);
-  const dowTarget = getDayOfWeekLabel(body.date);
-  const formattedDateTarget = formatDate(body.date);
-  const staffTypeStr = staff.type ? `${staff.type}. ` : "";
-
+  await env.DB.prepare(
+    "UPDATE assignments SET date = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+  ).bind(date, user.id, id).run();
   await audit(
     env,
     user.id,
     "move",
     "assignment",
     id,
-    `Đổi lịch ${staffTypeStr}${current.staff_name} trực ${dowCurrent} ngày ${formattedDateCurrent} sang ${unit.label} ${dowTarget} ngày ${formattedDateTarget}`
+    `Chuyển ${current.department_name} từ ${formatFullDate(current.date)} sang ${formatFullDate(date)}`
   );
   return json({ ok: true });
 }
 
 async function deleteAssignment(env: Env, user: User, id: number): Promise<Response> {
-  requireAdmin(user);
-  const assignment = await env.DB.prepare(
-    `SELECT a.id, a.date, u.label, s.name
-     FROM schedule_assignments a
-     JOIN schedule_units u ON u.id = a.unit_id
-     JOIN staff s ON s.id = a.staff_id
-     WHERE a.id = ?`
-  ).bind(id).first<{ id: number; date: string; label: string; name: string }>();
-  if (!assignment) throw new HttpError(404, "Không tìm thấy phân công.");
-  await env.DB.prepare("DELETE FROM schedule_assignments WHERE id = ?").bind(id).run();
-  await audit(env, user.id, "delete", "assignment", id, `Xóa ${assignment.label} ${assignment.date}: ${assignment.name}`);
-  return json({ ok: true });
-}
-
-async function confirmSchedule(request: Request, env: Env, user: User): Promise<Response> {
-  requireAdmin(user);
-  const body = await readJson<{ weekStart?: string }>(request);
-  const weekStart = normalizeWeekStart(body.weekStart);
-  const days = getWeekDays(weekStart);
-  await env.DB.prepare(
-    `UPDATE schedule_assignments SET confirmed = 1, updated_by = ?, updated_at = CURRENT_TIMESTAMP
-     WHERE date BETWEEN ? AND ?`
-  ).bind(user.id, days[0], days[6]).run();
-  await audit(env, user.id, "confirm", "schedule", null, `Duyệt lịch tuần ${weekStart}`);
-  return json({ ok: true });
-}
-
-async function clearSchedule(request: Request, env: Env, user: User): Promise<Response> {
-  requireAdmin(user);
-  const body = await readJson<{ weekStart?: string; scope?: string }>(request);
-  const weekStart = normalizeWeekStart(body.weekStart);
-  const days = getWeekDays(weekStart);
-  const scopes: Record<string, { types: ScheduleUnit["type"][]; label: string; range: "week" | "month" }> = {
-    duty_bs: { types: ["duty_bs"], label: "lịch trực BS", range: "week" },
-    duty_ktv: { types: ["duty_ktv"], label: "lịch trực KTV", range: "week" },
-    duty: { types: ["duty_bs", "duty_ktv"], label: "lịch trực", range: "week" },
-    work_bs: { types: ["work_bs"], label: "lịch làm việc BS", range: "week" },
-    work_ktv: { types: ["work_ktv"], label: "lịch làm việc KTV", range: "week" },
-    all: { types: ["duty_bs", "duty_ktv", "work_bs", "work_ktv"], label: "toàn bộ lịch", range: "week" },
-    month_all: { types: ["duty_bs", "duty_ktv", "work_bs", "work_ktv"], label: "toàn bộ lịch tháng", range: "month" }
-  };
-  const selected = body.scope ? scopes[body.scope] : null;
-  if (!selected) throw new HttpError(400, "Chế độ xóa không hợp lệ.");
-  const [year, month] = weekStart.split("-").map(Number);
-  const rangeStart = selected.range === "month" ? `${year}-${String(month).padStart(2, "0")}-01` : days[0];
-  const rangeEnd = selected.range === "month"
-    ? `${year}-${String(month).padStart(2, "0")}-${String(new Date(Date.UTC(year, month, 0)).getUTCDate()).padStart(2, "0")}`
-    : days[6];
-  const placeholders = selected.types.map(() => "?").join(", ");
-  const result = await env.DB.prepare(
-    `DELETE FROM schedule_assignments
-     WHERE date BETWEEN ? AND ?
-     AND unit_id IN (SELECT id FROM schedule_units WHERE computed = 0 AND type IN (${placeholders}))`
-  ).bind(rangeStart, rangeEnd, ...selected.types).run();
-  const deleted = result.meta.changes || 0;
-  const rangeLabel = selected.range === "month" ? `${String(month).padStart(2, "0")}/${year}` : `tuần ${weekStart}`;
-  await audit(env, user.id, "delete", "schedule", null, `Xóa ${selected.label} ${rangeLabel}: ${deleted} phân công`);
-  return json({ ok: true });
-}
-
-async function recalculateWorkSchedule(request: Request, env: Env, user: User): Promise<Response> {
-  requireAdmin(user);
-  const body = await readJson<{ weekStart?: string }>(request);
-  const weekStart = normalizeWeekStart(body.weekStart);
-  const days = getWeekDays(weekStart);
-  const [units, rotations, leaveDays, bsOffDays, ktvOffDays] = await Promise.all([
-    listUnits(env),
-    listRotations(env),
-    listLeaveDays(env, days),
-    listPostDutyOffDays(env, { type: "work_bs" } as ScheduleUnit, days),
-    listPostDutyOffDays(env, { type: "work_ktv" } as ScheduleUnit, days)
-  ]);
-  const unavailableStaffDays = new Set([
-    ...bsOffDays,
-    ...ktvOffDays,
-    ...leaveDays.map((day) => `${day.staffId}:${day.date}`)
-  ]);
-  const statements: PostgresPreparedStatement[] = [];
-  for (const key of bsOffDays) {
-    const [staffId, date] = key.split(":");
-    statements.push(
-      env.DB.prepare(
-        "DELETE FROM schedule_assignments WHERE staff_id = ? AND date = ? AND unit_id IN (SELECT id FROM schedule_units WHERE type = 'work_bs')"
-      ).bind(Number(staffId), date)
-    );
-  }
-  for (const key of ktvOffDays) {
-    const [staffId, date] = key.split(":");
-    statements.push(
-      env.DB.prepare(
-        "DELETE FROM schedule_assignments WHERE staff_id = ? AND date = ? AND unit_id IN (SELECT id FROM schedule_units WHERE type = 'work_ktv')"
-      ).bind(Number(staffId), date)
-    );
-  }
-  const deleteStatementCount = statements.length;
-  const plannedAssignments = workRotationAssignmentsForDates(units, rotations, days, unavailableStaffDays);
-  for (const assignment of plannedAssignments) {
-    statements.push(
-      env.DB.prepare(
-        `INSERT INTO schedule_assignments
-         (unit_id, date, staff_id, slot, confirmed, created_by, updated_by)
-         VALUES (?, ?, ?, ?, 0, ?, ?)
-         ON CONFLICT DO NOTHING`
-      ).bind(assignment.unitId, assignment.date, assignment.staffId, assignment.slot, user.id, user.id)
-    );
-  }
-  let deleted = 0;
-  let restored = 0;
-  if (statements.length) {
-    const results = await env.DB.batch(statements);
-    deleted = results.slice(0, deleteStatementCount).reduce((sum, result) => sum + (result.meta.changes || 0), 0);
-    restored = results.slice(deleteStatementCount).reduce((sum, result) => sum + (result.meta.changes || 0), 0);
-  }
-  const repairedSwaps = await reconcileApprovedSwapWorkSchedules(env, days, user.id);
+  requireScheduler(user);
+  const current = await env.DB.prepare(
+    `SELECT a.date, d.name AS department_name
+     FROM assignments a JOIN departments d ON d.id = a.department_id WHERE a.id = ?`
+  ).bind(id).first<{ date: string; department_name: string }>();
+  if (!current) throw new HttpError(404, "Không tìm thấy phân công.");
+  await env.DB.prepare("DELETE FROM assignments WHERE id = ?").bind(id).run();
   await audit(
     env,
     user.id,
-    "recalculate",
-    "schedule",
+    "delete",
+    "assignment",
+    id,
+    `Xóa phân công ${current.department_name} ngày ${formatFullDate(current.date)}`
+  );
+  return json({ ok: true });
+}
+
+export function clearScheduleStatement(scope: "month" | "date", value: string): { sql: string; bindings: string[] } {
+  return scope === "date"
+    ? { sql: "DELETE FROM assignments WHERE date = ?", bindings: [value] }
+    : { sql: "DELETE FROM assignments WHERE date BETWEEN ? AND ?", bindings: [monthRange(value).from, monthRange(value).to] };
+}
+
+async function clearSchedule(request: Request, env: Env, user: User): Promise<Response> {
+  requireScheduler(user);
+  const body = await readJson<{ month?: string; date?: string }>(request);
+  const scope: "month" | "date" = body.date ? "date" : "month";
+  const value = scope === "date" ? String(body.date).slice(0, 10) : normalizeMonth(body.month);
+  if (scope === "date" && !isIsoDate(value)) throw new HttpError(400, "Ngày cần xóa không hợp lệ.");
+
+  const statement = clearScheduleStatement(scope, value);
+  const result = await env.DB.prepare(statement.sql).bind(...statement.bindings).run();
+  await audit(
+    env,
+    user.id,
+    "delete",
+    "assignment",
     null,
-    `Cập nhật lại lịch làm việc tuần ${weekStart}: bỏ ${deleted + repairedSwaps.removed} phân công sai/ngày ra trực, khôi phục ${restored + repairedSwaps.restored} phân công theo tua`
+    scope === "date"
+      ? `Xóa toàn bộ phân công ngày ${formatFullDate(value)}`
+      : `Xóa toàn bộ phân công tháng ${value}`
   );
-  return json({ ok: true, deleted: deleted + repairedSwaps.removed, restored: restored + repairedSwaps.restored });
+  return json({ ok: true, deleted: result.meta.changes || 0 });
 }
 
-async function reconcileApprovedSwapWorkSchedules(
-  env: Env,
-  days: string[],
-  updatedBy: number | null
-): Promise<{ removed: number; restored: number }> {
-  const rangeStart = addDays(days[0], -1);
-  const rangeEnd = addDays(days[days.length - 1], 1);
-  const swaps = await env.DB.prepare(
-    `SELECT staff_id_1, date_1, staff_id_2, date_2
-     FROM swap_requests
-     WHERE status = 'approved'
-       AND (date_1 BETWEEN ? AND ? OR date_2 BETWEEN ? AND ?)
-     ORDER BY updated_at, id`
-  ).bind(rangeStart, rangeEnd, rangeStart, rangeEnd)
-    .all<{ staff_id_1: number; date_1: string; staff_id_2: number; date_2: string }>();
-
-  const daySet = new Set(days);
-  const affected = new Map<string, Set<number>>();
-  for (const swap of swaps.results || []) {
-    for (const date of [postDutyOffDate(swap.date_1), postDutyOffDate(swap.date_2)]) {
-      if (!daySet.has(date)) continue;
-      const staffIds = affected.get(date) || new Set<number>();
-      staffIds.add(swap.staff_id_1);
-      staffIds.add(swap.staff_id_2);
-      affected.set(date, staffIds);
-    }
-  }
-  if (affected.size === 0) return { removed: 0, restored: 0 };
-
-  const [units, rotations, leaveDays, bsOffDays, ktvOffDays] = await Promise.all([
-    listUnits(env),
-    listRotations(env),
-    listLeaveDays(env, days),
-    listPostDutyOffDays(env, { type: "work_bs" } as ScheduleUnit, days),
-    listPostDutyOffDays(env, { type: "work_ktv" } as ScheduleUnit, days)
-  ]);
-  const leaveSet = new Set(leaveDays.map((day) => `${day.staffId}:${day.date}`));
-  const offDays = new Set([...bsOffDays, ...ktvOffDays]);
-  const operations: Array<{ kind: "delete" | "insert"; statement: PostgresPreparedStatement }> = [];
-
-  for (const [date, staffIds] of affected) {
-    for (const staffId of staffIds) {
-      operations.push({
-        kind: "delete",
-        statement: env.DB.prepare(
-          `DELETE FROM schedule_assignments
-           WHERE staff_id = ? AND date = ?
-             AND unit_id IN (SELECT id FROM schedule_units WHERE type IN ('work_bs', 'work_ktv'))`
-        ).bind(staffId, date)
-      });
-      if (offDays.has(`${staffId}:${date}`) || leaveSet.has(`${staffId}:${date}`)) continue;
-      for (const assignment of workRotationAssignmentsForStaff(units, rotations, staffId, date)) {
-        operations.push({
-          kind: "insert",
-          statement: env.DB.prepare(
-            `INSERT INTO schedule_assignments
-             (unit_id, date, staff_id, slot, confirmed, created_by, updated_by)
-             VALUES (?, ?, ?, ?, 0, ?, ?)
-             ON CONFLICT (unit_id, date, slot) DO NOTHING`
-          ).bind(assignment.unitId, date, staffId, assignment.slot, updatedBy, updatedBy)
-        });
-      }
-    }
-  }
-
-  const results = await env.DB.batch(operations.map((operation) => operation.statement));
-  return operations.reduce(
-    (totals, operation, index) => {
-      const changes = results[index]?.meta.changes || 0;
-      if (operation.kind === "delete") totals.removed += changes;
-      else totals.restored += changes;
-      return totals;
-    },
-    { removed: 0, restored: 0 }
-  );
+async function listCoordinators(env: Env): Promise<User[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT id, username, role, department_id, full_name, NULL AS department_name, signature
+     FROM users WHERE role = 'dieu_phoi' AND disabled = 0 ORDER BY full_name, username`
+  ).all<UserRow>();
+  return results.map(mapUserRow).map(publicUser);
 }
 
-async function saveRotation(request: Request, env: Env, user: User, unitId: number): Promise<Response> {
+async function listCoordinatorAssignments(env: Env, from: string, to: string): Promise<CoordinatorAssignment[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT c.id, c.date, c.user_id, u.username, u.full_name
+     FROM coordinator_assignments c
+     JOIN users u ON u.id = c.user_id
+     WHERE c.date BETWEEN ? AND ?
+     ORDER BY c.date, c.member_order, u.full_name, u.username`
+  ).bind(from, to).all<CoordinatorAssignmentRow>();
+  return results.map(mapCoordinatorAssignmentRow);
+}
+
+async function getCoordinatorAssignment(env: Env, id: number): Promise<CoordinatorAssignment> {
+  const row = await env.DB.prepare(
+    `SELECT c.id, c.date, c.user_id, u.username, u.full_name
+     FROM coordinator_assignments c JOIN users u ON u.id = c.user_id WHERE c.id = ?`
+  ).bind(id).first<CoordinatorAssignmentRow>();
+  if (!row) throw new HttpError(404, "Không tìm thấy phân công điều phối.");
+  return mapCoordinatorAssignmentRow(row);
+}
+
+async function assertCoordinatorFree(env: Env, userId: number, date: string, exceptId?: number): Promise<void> {
+  const lookup = exceptId === undefined
+    ? { sql: "SELECT id FROM coordinator_assignments WHERE user_id = ? AND date = ?", bindings: [userId, date] }
+    : {
+        sql: "SELECT id FROM coordinator_assignments WHERE user_id = ? AND date = ? AND id <> ?",
+        bindings: [userId, date, exceptId]
+      };
+  const existing = await env.DB.prepare(lookup.sql).bind(...lookup.bindings).first();
+  if (existing) throw new HttpError(409, `Điều phối này đã có mặt trong ngày ${formatFullDate(date)}.`);
+}
+
+async function putCoordinatorAssignment(request: Request, env: Env, user: User): Promise<Response> {
   requireAdmin(user);
-  const unit = await getUnitById(env, unitId);
-  if (unit.computed) throw new HttpError(400, "Hàng tự động không thể tạo tua.");
-  const body = await readJson<{ startDate?: string; mode?: "daily" | "weekly"; turns?: number[][] }>(request);
+  const body = await readJson<{ date?: string; userId?: number }>(request);
+  const date = String(body.date || "").slice(0, 10);
+  const userId = Number(body.userId || 0);
+  if (!isIsoDate(date) || !userId) throw new HttpError(400, "Thiếu ngày làm hoặc điều phối.");
+
+  const workDay = await env.DB.prepare("SELECT date FROM work_days WHERE date = ?").bind(date).first();
+  if (!workDay) throw new HttpError(400, "Ngày này chưa được mở làm việc. Hãy thêm ngày làm trước.");
+
+  const coordinator = await env.DB.prepare(
+    "SELECT id, username, full_name FROM users WHERE id = ? AND role = 'dieu_phoi' AND disabled = 0"
+  ).bind(userId).first<{ id: number; username: string; full_name: string | null }>();
+  if (!coordinator) throw new HttpError(404, "Không tìm thấy tài khoản điều phối.");
+  await assertCoordinatorFree(env, userId, date);
+
+  const existingCount = await env.DB.prepare(
+    "SELECT COUNT(*) AS value FROM coordinator_assignments WHERE date = ?"
+  ).bind(date).first<{ value: number }>();
+
+  const result = await env.DB.prepare(
+    `INSERT INTO coordinator_assignments (date, user_id, member_order, created_by, updated_by)
+     VALUES (?, ?, ?, ?, ?)`
+  ).bind(date, userId, Number(existingCount?.value || 0), user.id, user.id).run();
+  await audit(
+    env,
+    user.id,
+    "create",
+    "coordinator_assignment",
+    result.meta.last_row_id,
+    `Xếp điều phối ${coordinator.full_name || coordinator.username} ngày ${formatFullDate(date)}`
+  );
+  return json({ ok: true }, 201);
+}
+
+async function deleteCoordinatorAssignment(env: Env, user: User, id: number): Promise<Response> {
+  requireAdmin(user);
+  const current = await getCoordinatorAssignment(env, id);
+  await env.DB.prepare("DELETE FROM coordinator_assignments WHERE id = ?").bind(id).run();
+  await audit(
+    env,
+    user.id,
+    "delete",
+    "coordinator_assignment",
+    id,
+    `Bỏ điều phối ${current.fullName || current.username} ngày ${formatFullDate(current.date)}`
+  );
+  return json({ ok: true });
+}
+
+async function moveCoordinatorAssignment(request: Request, env: Env, user: User, id: number): Promise<Response> {
+  requireAdmin(user);
+  const body = await readJson<{ date?: string }>(request);
+  const date = String(body.date || "").slice(0, 10);
+  if (!isIsoDate(date)) throw new HttpError(400, "Thiếu ngày làm đích.");
+
+  const current = await getCoordinatorAssignment(env, id);
+  if (current.date === date) return json({ ok: true });
+  const workDay = await env.DB.prepare("SELECT date FROM work_days WHERE date = ?").bind(date).first();
+  if (!workDay) throw new HttpError(400, "Ngày này chưa được mở làm việc.");
+  await assertCoordinatorFree(env, current.userId, date, id);
+
+  await env.DB.prepare(
+    "UPDATE coordinator_assignments SET date = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+  ).bind(date, user.id, id).run();
+  await audit(
+    env,
+    user.id,
+    "move_coordinator",
+    "coordinator_assignment",
+    id,
+    `Chuyển điều phối ${current.fullName || current.username} từ ${formatFullDate(current.date)} sang ${formatFullDate(date)}`
+  );
+  return json({ ok: true });
+}
+
+const SWAP_EXPIRY_DAYS = 7;
+
+async function requestCoordinatorSwap(request: Request, env: Env, user: User): Promise<Response> {
+  const body = await readJson<{ assignmentId?: number; targetAssignmentId?: number }>(request);
+  const assignmentId = Number(body.assignmentId || 0);
+  const targetAssignmentId = Number(body.targetAssignmentId || 0);
+  if (!assignmentId || !targetAssignmentId) throw new HttpError(400, "Thiếu ngày làm cần đổi.");
+
+  const [source, target] = await Promise.all([
+    getCoordinatorAssignment(env, assignmentId),
+    getCoordinatorAssignment(env, targetAssignmentId)
+  ]);
+  const today = todayInVietnam();
+
+  // Admin xếp lịch trực tiếp, không cần đối phương đồng ý.
+  if (user.role === "admin") {
+    await performSwap(env, user, source, target);
+    return json({ ok: true });
+  }
+  if (user.role !== "dieu_phoi") throw new HttpError(403, "Chỉ điều phối được xin đổi ngày làm.");
+
+  const message = validateCoordinatorSwap({
+    source: { id: source.id, userId: source.userId, date: source.date },
+    target: { id: target.id, userId: target.userId, date: target.date },
+    requesterUserId: user.id,
+    today
+  });
+  if (message) throw new HttpError(400, message);
+
+  const duplicate = await env.DB.prepare(
+    `SELECT id FROM swap_requests
+     WHERE status = 'pending' AND (assignment_id_1 IN (?, ?) OR assignment_id_2 IN (?, ?))`
+  ).bind(source.id, target.id, source.id, target.id).first();
+  if (duplicate) throw new HttpError(409, "Đã có yêu cầu đổi ngày đang chờ duyệt cho một trong hai ngày này.");
+
+  const token = crypto.randomUUID();
+  const expiresAt = new Date(Date.now() + SWAP_EXPIRY_DAYS * 86400000).toISOString();
+  await env.DB.prepare(
+    `INSERT INTO swap_requests
+       (token, status, assignment_id_1, user_id_1, date_1, assignment_id_2, user_id_2, date_2, created_by, expires_at)
+     VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(token, source.id, source.userId, source.date, target.id, target.userId, target.date, user.id, expiresAt).run();
+
+  await audit(
+    env,
+    user.id,
+    "request_swap",
+    "swap_request",
+    null,
+    `Xin đổi ngày làm ${formatFullDate(source.date)} với ${target.fullName || target.username} ngày ${formatFullDate(target.date)}`
+  );
+  return json({ ok: true, pending: true, token }, 201);
+}
+
+interface SwapRow {
+  id: number;
+  token: string;
+  status: SwapRequest["status"];
+  assignment_id_1: number;
+  user_id_1: number;
+  name_1: string;
+  date_1: string;
+  assignment_id_2: number;
+  user_id_2: number;
+  name_2: string;
+  date_2: string;
+  created_at: string;
+  expires_at: string | null;
+}
+
+async function loadSwapRequest(env: Env, token: string): Promise<SwapRow> {
+  if (!token) throw new HttpError(400, "Thiếu mã yêu cầu đổi ngày.");
+  const row = await env.DB.prepare(
+    `SELECT s.id, s.token, s.status, s.assignment_id_1, s.user_id_1,
+            COALESCE(NULLIF(TRIM(u1.full_name), ''), u1.username) AS name_1, s.date_1,
+            s.assignment_id_2, s.user_id_2,
+            COALESCE(NULLIF(TRIM(u2.full_name), ''), u2.username) AS name_2, s.date_2,
+            s.created_at, s.expires_at
+     FROM swap_requests s
+     JOIN users u1 ON u1.id = s.user_id_1
+     JOIN users u2 ON u2.id = s.user_id_2
+     WHERE s.token = ?`
+  ).bind(token).first<SwapRow>();
+  if (!row) throw new HttpError(404, "Không tìm thấy yêu cầu đổi ngày làm.");
+  return row;
+}
+
+function mapSwapRow(row: SwapRow): SwapRequest {
+  return {
+    id: row.id,
+    token: row.token,
+    status: row.status,
+    assignmentId1: row.assignment_id_1,
+    userId1: row.user_id_1,
+    name1: row.name_1,
+    date1: row.date_1,
+    assignmentId2: row.assignment_id_2,
+    userId2: row.user_id_2,
+    name2: row.name_2,
+    date2: row.date_2,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at
+  };
+}
+
+async function getSwapRequestEndpoint(env: Env, url: URL, user: User): Promise<Response> {
+  const row = await loadSwapRequest(env, url.searchParams.get("token") || "");
+  if (user.role !== "admin" && user.id !== row.user_id_1 && user.id !== row.user_id_2) {
+    throw new HttpError(403, "Bạn không liên quan đến yêu cầu đổi ngày làm này.");
+  }
+  return json({ swap: mapSwapRow(row) });
+}
+
+function assertSwapRecipient(row: SwapRow, user: User): void {
+  if (row.status !== "pending") throw new HttpError(409, "Yêu cầu đổi ngày làm này đã được xử lý.");
+  if (row.expires_at && new Date(row.expires_at).getTime() < Date.now()) {
+    throw new HttpError(409, "Yêu cầu đổi ngày làm đã hết hạn.");
+  }
+  if (user.role !== "admin" && user.id !== row.user_id_2) {
+    throw new HttpError(403, "Chỉ điều phối được yêu cầu đổi mới có thể trả lời.");
+  }
+}
+
+/** Đổi chỗ hai ngày làm của hai điều phối. */
+async function performSwap(
+  env: Env,
+  user: User,
+  source: CoordinatorAssignment,
+  target: CoordinatorAssignment
+): Promise<void> {
+  await assertCoordinatorFree(env, source.userId, target.date, source.id);
+  await assertCoordinatorFree(env, target.userId, source.date, target.id);
+  await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE coordinator_assignments SET date = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+    ).bind(target.date, user.id, source.id),
+    env.DB.prepare(
+      "UPDATE coordinator_assignments SET date = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+    ).bind(source.date, user.id, target.id)
+  ]);
+  await audit(
+    env,
+    user.id,
+    "accept_swap",
+    "coordinator_assignment",
+    source.id,
+    `Đổi ngày làm: ${source.fullName || source.username} ${formatFullDate(source.date)} ↔ ${target.fullName || target.username} ${formatFullDate(target.date)}`
+  );
+}
+
+async function acceptSwapEndpoint(env: Env, url: URL, user: User): Promise<Response> {
+  const row = await loadSwapRequest(env, url.searchParams.get("token") || "");
+  assertSwapRecipient(row, user);
+
+  const [source, target] = await Promise.all([
+    getCoordinatorAssignment(env, row.assignment_id_1),
+    getCoordinatorAssignment(env, row.assignment_id_2)
+  ]);
+  if (source.date !== row.date_1 || target.date !== row.date_2) {
+    throw new HttpError(409, "Lịch đã thay đổi sau khi tạo yêu cầu. Vui lòng tạo yêu cầu mới.");
+  }
+
+  const claimed = await env.DB.prepare(
+    `UPDATE swap_requests SET status = 'approved', decided_at = CURRENT_TIMESTAMP, decided_by = ?
+     WHERE id = ? AND status = 'pending'`
+  ).bind(user.id, row.id).run();
+  if ((claimed.meta.changes || 0) !== 1) throw new HttpError(409, "Yêu cầu đổi ngày làm đã được xử lý.");
+
+  await performSwap(env, user, source, target);
+  return json({ ok: true });
+}
+
+async function rejectSwapEndpoint(env: Env, url: URL, user: User): Promise<Response> {
+  const row = await loadSwapRequest(env, url.searchParams.get("token") || "");
+  assertSwapRecipient(row, user);
+  const updated = await env.DB.prepare(
+    `UPDATE swap_requests SET status = 'rejected', decided_at = CURRENT_TIMESTAMP, decided_by = ?
+     WHERE id = ? AND status = 'pending'`
+  ).bind(user.id, row.id).run();
+  if ((updated.meta.changes || 0) !== 1) throw new HttpError(409, "Yêu cầu đổi ngày làm đã được xử lý.");
+  await audit(
+    env,
+    user.id,
+    "reject_swap",
+    "swap_request",
+    row.id,
+    `Từ chối đổi ngày làm ${formatFullDate(row.date_1)} ↔ ${formatFullDate(row.date_2)}`
+  );
+  return json({ ok: true });
+}
+
+async function loadRotation(env: Env): Promise<Rotation | null> {
+  const config = await env.DB.prepare("SELECT start_date, enabled FROM rotation_config WHERE id = 1")
+    .first<{ start_date: string; enabled: number }>();
+  if (!config) return null;
+  const { results } = await env.DB.prepare(
+    `SELECT m.turn_index, m.member_order, m.department_id, d.name AS department_name
+     FROM rotation_members m
+     JOIN departments d ON d.id = m.department_id
+     ORDER BY m.turn_index, m.member_order`
+  ).all<{ turn_index: number; member_order: number; department_id: number; department_name: string }>();
+
+  const turns: RotationMember[][] = [];
+  for (const row of results) {
+    while (turns.length <= row.turn_index) turns.push([]);
+    turns[row.turn_index].push({
+      departmentId: row.department_id,
+      departmentName: row.department_name,
+      turnIndex: row.turn_index,
+      memberOrder: row.member_order
+    });
+  }
+  return { startDate: config.start_date, enabled: !!config.enabled, turns };
+}
+
+async function saveRotation(request: Request, env: Env, user: User): Promise<Response> {
+  requireScheduler(user);
+  const body = await readJson<{ startDate?: string; turns?: number[][]; enabled?: boolean }>(request);
   const startDate = String(body.startDate || "").slice(0, 10);
-  const mode = body.mode === "weekly" ? "weekly" : "daily";
-  const turns = body.turns || [];
-  if (!isIsoDate(startDate) || !Array.isArray(turns) || turns.length === 0 || turns.some((turn) => !Array.isArray(turn) || turn.length === 0)) {
-    throw new HttpError(400, "Cần ngày bắt đầu và ít nhất một tua.");
+  const turns = body.turns;
+  if (!isIsoDate(startDate)) throw new HttpError(400, "Ngày bắt đầu tua không hợp lệ.");
+  if (!Array.isArray(turns) || turns.length === 0 || turns.some((turn) => !Array.isArray(turn) || turn.length === 0)) {
+    throw new HttpError(400, "Cần ít nhất một tua và mỗi tua có ít nhất một khoa phòng.");
+  }
+  if (turns.some((turn) => turn.some((departmentId) => !Number.isInteger(departmentId) || departmentId <= 0))) {
+    throw new HttpError(400, "Khoa phòng trong tua không hợp lệ.");
   }
   for (const turn of turns) {
-    if (new Set(turn).size !== turn.length) throw new HttpError(400, "Một nhân sự không thể xuất hiện hai lần trong cùng một tua.");
-    for (const staffId of turn) {
-      const staff = await getStaffById(env, staffId);
-      if (!acceptsStaffTypeForUnit(unit.type, staff.type)) throw new HttpError(400, `${staff.name} không đúng loại nhân sự cho ${unit.label}.`);
-    }
-    if (unit.maxPerDay !== null && turn.length > unit.maxPerDay) {
-      throw new HttpError(400, `${unit.label} tối đa ${unit.maxPerDay} người/tua.`);
+    if (new Set(turn).size !== turn.length) {
+      throw new HttpError(400, "Một khoa phòng không thể xuất hiện hai lần trong cùng một tua.");
     }
   }
-  const rotationStatement = env.DB.prepare(
-    `INSERT INTO unit_rotations (unit_id, start_date, mode, enabled, updated_by)
-     VALUES (?, ?, ?, 1, ?)
-     ON CONFLICT(unit_id) DO UPDATE SET start_date = excluded.start_date, mode = excluded.mode, enabled = 1, updated_by = excluded.updated_by, updated_at = CURRENT_TIMESTAMP`
-  ).bind(unitId, startDate, mode, user.id);
-  const deleteMembersStatement = env.DB.prepare("DELETE FROM unit_rotation_members WHERE unit_id = ?").bind(unitId);
-  const statements = turns.flatMap((turn, turnIndex) =>
-    turn.map((staffId, memberOrder) =>
-      env.DB.prepare("INSERT INTO unit_rotation_members (unit_id, turn_index, staff_id, member_order) VALUES (?, ?, ?, ?)")
-        .bind(unitId, turnIndex, staffId, memberOrder)
-    )
+
+  const departmentIds = [...new Set(turns.flat())];
+  const lookup = rotationDepartmentLookup(departmentIds);
+  const { results: departmentRows } = await env.DB.prepare(lookup.sql).bind(...lookup.bindings).all<DepartmentRow>();
+  const departmentsById = new Map(departmentRows.map((row) => [row.id, mapDepartmentRow(row)]));
+  const missing = departmentIds.find((departmentId) => !departmentsById.has(departmentId));
+  if (missing !== undefined) throw new HttpError(404, "Không tìm thấy khoa phòng trong tua.");
+  const inactive = departmentIds.find((departmentId) => !departmentsById.get(departmentId)!.active);
+  if (inactive !== undefined) {
+    throw new HttpError(400, `${departmentsById.get(inactive)!.name} đã ngừng hoạt động, không thể đưa vào tua.`);
+  }
+
+  const membersInsert = rotationMembersInsert(turns);
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO rotation_config (id, start_date, enabled, updated_by, updated_at)
+       VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(id) DO UPDATE SET start_date = excluded.start_date, enabled = excluded.enabled,
+         updated_by = excluded.updated_by, updated_at = CURRENT_TIMESTAMP`
+    ).bind(startDate, body.enabled === false ? 0 : 1, user.id),
+    env.DB.prepare("DELETE FROM rotation_members"),
+    env.DB.prepare(membersInsert.sql).bind(...membersInsert.bindings)
+  ]);
+  await audit(env, user.id, "save", "rotation", null, `Lưu tua khám: ${turns.length} tua, bắt đầu ${formatFullDate(startDate)}`);
+  return json({ ok: true });
+}
+
+async function applyRotation(request: Request, env: Env, user: User): Promise<Response> {
+  requireScheduler(user);
+  const body = await readJson<{ month?: string; keepPersons?: boolean }>(request);
+  const month = normalizeMonth(body.month);
+  const { from, to } = monthRange(month);
+
+  const rotation = await loadRotation(env);
+  if (!rotation || rotation.turns.length === 0) throw new HttpError(400, "Chưa cấu hình tua khám.");
+  if (!rotation.enabled) throw new HttpError(400, "Tua khám đang tắt.");
+
+  const workDays = await listWorkDays(env, from, to);
+  if (workDays.length === 0) throw new HttpError(400, `Tháng ${month} chưa có ngày làm nào.`);
+
+  // Giữ lại họ tên và số điện thoại khoa phòng đã điền cho từng ngày.
+  const existing = await listAssignments(env, from, to);
+  const persons = new Map(
+    existing
+      .filter((assignment) => assignment.personName.trim())
+      .map((assignment) => [`${assignment.date}:${assignment.departmentId}`, assignment])
   );
-  await env.DB.batch([rotationStatement, deleteMembersStatement, ...statements]);
-  await audit(env, user.id, "save", "rotation", unitId, `Lưu tua trực: ${unit.label}`);
-  return json({ ok: true });
-}
 
-async function applyRotation(request: Request, env: Env, user: User, unitId: number): Promise<Response> {
-  requireAdmin(user);
-  const unit = await getUnitById(env, unitId);
-  const body = await readJson<{ weekStart?: string; weeks?: number }>(request);
-  const weekStart = normalizeWeekStart(body.weekStart);
-  const weekCount = Math.max(1, Math.min(12, Number(body.weeks) || 1));
-  const rotation = (await listRotations(env)).find((item) => item.unitId === unitId);
-  const turns = (rotation?.turns || []).filter((turn) => Array.isArray(turn) && turn.length > 0);
-  if (!rotation || turns.length === 0) throw new HttpError(400, "Chưa có tua để áp dụng.");
-  const days = Array.from({ length: weekCount * 7 }, (_, index) => addDays(weekStart, index));
-  const statements: PostgresPreparedStatement[] = [];
-  const allAssignments = await listAssignments(env, days);
-  const allLeaveDays = await listLeaveDays(env, days);
-  const leaveSet = new Set(allLeaveDays.map((day) => `${day.staffId}:${day.date}`));
-  const postDutyOffDays = await listPostDutyOffDays(env, unit, days);
-  for (const date of days) {
-    const idx = rotationTurnIndex(rotation.startDate, date, rotation.mode, turns.length);
-    const staffIds = turns[idx].map((member) => member.staffId);
-    for (const [slot, staffId] of staffIds.entries()) {
-      if (postDutyOffDays.has(`${staffId}:${date}`) || leaveSet.has(`${staffId}:${date}`)) continue;
-      const staff = await getStaffById(env, staffId);
-      const msg = validateAssignmentInput({
-        unit,
-        staff,
-        date,
-        assignments: allAssignments.filter((a) => !(a.unitId === unitId && a.date === date)),
-        leaveDays: allLeaveDays
-      });
-      if (msg) throw new HttpError(400, `${date}: ${msg}`);
-      statements.push(
-        env.DB.prepare(
-          "INSERT INTO schedule_assignments (unit_id, date, staff_id, slot, created_by, updated_by) VALUES (?, ?, ?, ?, ?, ?)"
-        ).bind(unitId, date, staffId, slot, user.id, user.id)
-      );
-    }
+  const planned = rotationAssignmentsForWorkDays(
+    workDays.map((workDay) => workDay.date),
+    rotation.turns,
+    rotation.startDate
+  );
+  if (planned.length === 0) {
+    throw new HttpError(400, `Không có ngày làm nào trong tháng ${month} tính từ ngày bắt đầu tua.`);
   }
-  const deleteStatement = env.DB.prepare("DELETE FROM schedule_assignments WHERE unit_id = ? AND date BETWEEN ? AND ?")
-    .bind(unitId, days[0], days[days.length - 1]);
-  await env.DB.batch([deleteStatement, ...statements]);
-  await audit(env, user.id, "apply", "rotation", unitId, `Áp dụng tua ${unit.label} tuần ${weekStart}`);
-  return json({ ok: true });
-}
 
-async function listPostDutyOffDays(env: Env, unit: ScheduleUnit, days: string[]): Promise<Set<string>> {
-  if (unit.type !== "work_bs" && unit.type !== "work_ktv") return new Set();
-  const dutyCode = unit.type === "work_bs" ? "duty_bs" : "duty_ktv";
-  const firstDutyDate = addDays(days[0], -1);
-  const lastDutyDate = addDays(days[days.length - 1], 1);
-  const rows = await env.DB.prepare(
-    `SELECT a.date, a.staff_id
-     FROM schedule_assignments a
-     JOIN schedule_units u ON u.id = a.unit_id
-     WHERE u.code = ? AND a.date BETWEEN ? AND ?`
-  ).bind(dutyCode, firstDutyDate, lastDutyDate).all<{ date: string; staff_id: number }>();
-  const daySet = new Set(days);
-  const offDays = new Set<string>();
-  for (const row of rows.results || []) {
-    const offDate = postDutyOffDate(row.date);
-    if (daySet.has(offDate)) offDays.add(`${row.staff_id}:${offDate}`);
-  }
-  return offDays;
-}
-
-interface DutySwapWorkSyncInput {
-  staffId1: number;
-  dutyDate1: string;
-  staffId2: number;
-  dutyDate2: string;
-  updatedBy: number | null;
-}
-
-async function syncWorkScheduleAfterDutySwap(env: Env, input: DutySwapWorkSyncInput): Promise<void> {
-  const oldOffDate1 = postDutyOffDate(input.dutyDate1);
-  const oldOffDate2 = postDutyOffDate(input.dutyDate2);
-  if (oldOffDate1 === oldOffDate2) return;
-
-  const today = todayInVietnam();
-  const changes = [
-    {
-      date: oldOffDate2,
-      newOffStaffId: input.staffId1,
-      returningStaffId: input.staffId2,
-      shouldSync: shouldSyncPostDutyOffDate(input.dutyDate2, today)
-    },
-    {
-      date: oldOffDate1,
-      newOffStaffId: input.staffId2,
-      returningStaffId: input.staffId1,
-      shouldSync: shouldSyncPostDutyOffDate(input.dutyDate1, today)
-    }
+  const statements: PostgresPreparedStatement[] = [
+    env.DB.prepare("DELETE FROM assignments WHERE date BETWEEN ? AND ?").bind(from, to)
   ];
-
-  for (const change of changes) {
-    if (!change.shouldSync) continue;
-    const [units, rotations, returningLeave] = await Promise.all([
-      listUnits(env),
-      listRotations(env),
-      env.DB.prepare(
-        `SELECT 1
-         FROM leave_days ld
-         JOIN leave_requests lr ON lr.id = ld.request_id
-         WHERE ld.staff_id = ? AND ld.date = ? AND lr.status = 'approved'`
-      ).bind(change.returningStaffId, change.date).first<{ exists: number }>()
-    ]);
-    const expectedAssignments = returningLeave
-      ? []
-      : workRotationAssignmentsForStaff(units, rotations, change.returningStaffId, change.date);
-
-    const statements: PostgresPreparedStatement[] = [
-      env.DB.prepare(
-        `DELETE FROM schedule_assignments
-         WHERE date = ? AND staff_id IN (?, ?)
-         AND unit_id IN (SELECT id FROM schedule_units WHERE type IN ('work_bs', 'work_ktv'))`
-      ).bind(change.date, change.newOffStaffId, change.returningStaffId)
-    ];
-    for (const assignment of expectedAssignments) {
-      statements.push(
-        env.DB.prepare(
-          `INSERT INTO schedule_assignments
-           (unit_id, date, staff_id, slot, confirmed, created_by, updated_by)
-           VALUES (?, ?, ?, ?, 0, ?, ?)
-           ON CONFLICT (unit_id, date, slot) DO NOTHING`
-        ).bind(assignment.unitId, change.date, change.returningStaffId, assignment.slot, input.updatedBy, input.updatedBy)
-      );
-    }
-    await env.DB.batch(statements);
-  }
-}
-
-async function reorderUnits(request: Request, env: Env, user: User): Promise<Response> {
-  requireAdmin(user);
-  const body = await readJson<{ unitIds?: number[] }>(request);
-  const unitIds = body.unitIds || [];
-  if (!unitIds.length) throw new HttpError(400, "Thiếu danh sách row.");
-  const units = await listUnits(env);
-  const allowed = new Set(units.filter((u) => u.section === "II" || u.section === "III").map((u) => u.id));
-  if (unitIds.some((id) => !allowed.has(id))) throw new HttpError(400, "Chỉ được đổi vị trí row ở Phần II và III.");
-  const first = units.find((u) => u.id === unitIds[0]);
-  if (!first || unitIds.some((id) => units.find((u) => u.id === id)?.section !== first.section)) {
-    throw new HttpError(400, "Chỉ đổi vị trí trong cùng một phần.");
-  }
-  const base = first.section === "II" ? 110 : 210;
-  const statements = unitIds.map((id, index) => env.DB.prepare("UPDATE schedule_units SET sort_order = ? WHERE id = ?").bind(base + index * 10, id));
-  await env.DB.batch(statements);
-  await audit(env, user.id, "reorder", "schedule_unit", null, "Đổi vị trí row Phần II/III");
-  return json({ ok: true });
-}
-
-async function createUnit(request: Request, env: Env, user: User): Promise<Response> {
-  requireAdmin(user);
-  const body = await readJson<{ label?: string; type?: string }>(request);
-  const label = String(body.label || "").trim();
-  const type = body.type;
-
-  if (!label) throw new HttpError(400, "Thiếu tên phòng/việc.");
-  if (type !== "work_bs" && type !== "work_ktv") {
-    throw new HttpError(400, "Loại phòng/việc không hợp lệ.");
-  }
-
-  const section = type === "work_bs" ? "II" : "III";
-  const code = `${type}_${Date.now()}`;
-
-  // Find max sort_order for the section
-  const row = await env.DB.prepare(
-    "SELECT COALESCE(MAX(sort_order), ?) AS max_sort FROM schedule_units WHERE section = ?"
-  ).bind(type === "work_bs" ? 100 : 200, section).first<{ max_sort: number }>();
-  const sortOrder = (row?.max_sort ?? (type === "work_bs" ? 100 : 200)) + 10;
-
-  const result = await env.DB.prepare(
-    "INSERT INTO schedule_units (code, section, label, type, sort_order, computed) VALUES (?, ?, ?, ?, ?, 0)"
-  ).bind(code, section, label, type, sortOrder).run();
-
-  const newId = result.meta.last_row_id;
-  await audit(env, user.id, "create", "schedule_unit", Number(newId), `Thêm phòng/việc ${type === "work_bs" ? "BS" : "KTV"}: ${label}`);
-
-  return json({ ok: true, unit: { id: Number(newId), code, section, label, type, sortOrder, computed: 0 } });
-}
-
-async function updateUnit(request: Request, env: Env, user: User, id: number): Promise<Response> {
-  requireAdmin(user);
-  const body = await readJson<{ label?: string }>(request);
-  const label = String(body.label || "").trim();
-  if (!label) throw new HttpError(400, "Tên phòng/việc không được để trống.");
-
-  const current = await env.DB.prepare(
-    "SELECT id, label, type FROM schedule_units WHERE id = ?"
-  ).bind(id).first<{ id: number; label: string; type: string }>();
-
-  if (!current) throw new HttpError(404, "Không tìm thấy phòng/việc.");
-  if (current.type !== "work_bs" && current.type !== "work_ktv") {
-    throw new HttpError(403, "Không được sửa phòng/việc trực cố định.");
-  }
-
-  await env.DB.prepare(
-    "UPDATE schedule_units SET label = ? WHERE id = ?"
-  ).bind(label, id).run();
-
-  await audit(env, user.id, "update", "schedule_unit", id, `Sửa phòng/việc ${current.type === "work_bs" ? "BS" : "KTV"}: ${current.label} thành ${label}`);
-
-  return json({ ok: true });
-}
-
-async function deleteUnit(env: Env, user: User, id: number): Promise<Response> {
-  requireAdmin(user);
-  const current = await env.DB.prepare(
-    "SELECT id, label, type FROM schedule_units WHERE id = ?"
-  ).bind(id).first<{ id: number; label: string; type: string }>();
-
-  if (!current) throw new HttpError(404, "Không tìm thấy phòng/việc.");
-  if (current.type !== "work_bs" && current.type !== "work_ktv") {
-    throw new HttpError(403, "Không được xóa phòng/việc trực cố định.");
-  }
-
-  await env.DB.prepare(
-    "DELETE FROM schedule_units WHERE id = ?"
-  ).bind(id).run();
-
-  await audit(env, user.id, "delete", "schedule_unit", id, `Xóa phòng/việc ${current.type === "work_bs" ? "BS" : "KTV"}: ${current.label}`);
-
-  return json({ ok: true });
-}
-
-async function getLeave(env: Env, url: URL): Promise<Response> {
-  const weekStart = normalizeWeekStart(url.searchParams.get("weekStart"));
-  return json({ leaveDays: await listLeaveDays(env, getWeekDays(weekStart)) });
-}
-
-async function createLeave(request: Request, env: Env, user: User): Promise<Response> {
-  const body = await readJson<{ staffId?: number; dates?: string[]; reason?: string }>(request);
-  const requestedStaffId = body.staffId ?? user.staffId;
-  if (!requestedStaffId) throw new HttpError(400, "Tài khoản chưa liên kết nhân sự.");
-  if (user.role !== "admin" && user.staffId !== requestedStaffId) {
-    throw new HttpError(403, "Chỉ được xin nghỉ cho chính mình.");
-  }
-  const staff = await getStaffById(env, requestedStaffId);
-  const dates = [...new Set((body.dates || []).map((date) => String(date).slice(0, 10)))].sort();
-  if (dates.length === 0) throw new HttpError(400, "Chưa chọn ngày nghỉ phép.");
-
-  // Prevent regular users from registering leave in the past
-  if (user.role !== "admin") {
-    const today = todayInVietnam();
-    const pastDates = dates.filter((d) => d < today);
-    if (pastDates.length > 0) {
-      throw new HttpError(400, `Không thể xin nghỉ phép cho các ngày trong quá khứ: ${pastDates.join(", ")}`);
-    }
-  }
-
-  // Check blocked leave dates (only for non-admin)
-  if (user.role !== "admin") {
-    const placeholders = dates.map(() => "?").join(",");
-    const { results } = await env.DB.prepare(
-      `SELECT date FROM blocked_leave_days WHERE date IN (${placeholders})`
-    ).bind(...dates).all<{ date: string }>();
-
-    if (results && results.length > 0) {
-      const blockedList = results.map((r) => r.date).join(", ");
-      throw new HttpError(400, `Không thể xin nghỉ phép vào ngày bị khóa: ${blockedList}`);
-    }
-  }
-
-  const leaveDays = dates.length ? await listLeaveDays(env, [dates[0], dates[dates.length - 1]], true) : [];
-  const message = validateLeaveInput({ staff, dates, leaveDays, limitPerType: 2 });
-  if (message) throw new HttpError(400, message);
-  await assertNoDutyLeaveConflicts(env, staff.id, dates);
-
-  // Determine status based on settings
-  const settings = await getSettings(env);
-  const requireApproval = staff.type === "BS" ? settings.approve_leave_bs : (staff.type === "KTV" ? settings.approve_leave_ktv : false);
-  const status = (user.role === "admin" || !requireApproval) ? "approved" : "pending";
-
-  const result = await env.DB.prepare(
-    `INSERT INTO leave_requests
-     (staff_id, reason, status, created_by, requested_dates, decision, decided_at, decided_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(
-    staff.id,
-    body.reason || null,
-    status,
-    user.id,
-    dates.join(","),
-    status === "approved" ? "approved" : null,
-    status === "approved" ? new Date().toISOString() : null,
-    status === "approved" ? user.id : null
-  ).run();
-  const requestId = result.meta.last_row_id;
-
-  const statements = dates.map((date) =>
-    env.DB.prepare("INSERT INTO leave_days (request_id, staff_id, date, staff_type) VALUES (?, ?, ?, ?)")
-      .bind(requestId, staff.id, date, staff.type)
-  );
-
-  if (status === "approved") {
-    const placeholders = dates.map(() => "?").join(",");
+  let restored = 0;
+  for (const item of planned) {
+    const previous = persons.get(`${item.date}:${item.departmentId}`);
+    if (previous) restored += 1;
     statements.push(
-      env.DB.prepare(`
-        DELETE FROM schedule_assignments
-        WHERE staff_id = ?
-          AND date IN (${placeholders})
-          AND unit_id IN (SELECT id FROM schedule_units WHERE type IN ('work_bs', 'work_ktv'))
-      `).bind(staff.id, ...dates)
+      env.DB.prepare(
+        `INSERT INTO assignments (date, department_id, person_name, person_phone, member_order, created_by, updated_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        item.date,
+        item.departmentId,
+        previous?.personName || "",
+        previous?.personPhone || "",
+        item.memberOrder,
+        user.id,
+        user.id
+      )
     );
   }
 
   await env.DB.batch(statements);
-
-  const summaryText = status === "pending" ? `Đăng ký nghỉ phép (chờ duyệt) ${staff.name}: ${dates.join(", ")}` : `Nghỉ phép ${staff.name}: ${dates.join(", ")}`;
-  await audit(env, user.id, "create", "leave", requestId, summaryText);
-  return json({ ok: true, pending: status === "pending" }, 201);
-}
-
-async function assertNoDutyLeaveConflicts(env: Env, staffId: number, dates: string[]): Promise<void> {
-  if (dates.length === 0) return;
-  const requestedDates = new Set(dates);
-  const dutyAssignments = await env.DB.prepare(
-    `SELECT sa.date, su.label
-     FROM schedule_assignments sa
-     JOIN schedule_units su ON su.id = sa.unit_id
-     WHERE sa.staff_id = ?
-       AND su.type IN ('duty_common', 'duty_bs', 'duty_ktv')
-       AND sa.date BETWEEN ? AND ?`
-  ).bind(staffId, addDays(dates[0], -1), addDays(dates[dates.length - 1], 1))
-    .all<{ date: string; label: string }>();
-
-  const onDuty = (dutyAssignments.results || []).filter((row) => requestedDates.has(row.date));
-  if (onDuty.length > 0) {
-    const details = onDuty.map((row) => `${formatDate(row.date)} (${row.label})`).join(", ");
-    throw new HttpError(400, `Không thể xin nghỉ phép vì nhân sự có lịch trực vào ngày nghỉ đã chọn: ${details}`);
-  }
-
-  const postDuty = (dutyAssignments.results || []).filter((row) =>
-    [...requestedDates].some((leaveDate) => row.date !== leaveDate && conflictsWithDutyLeave(row.date, leaveDate))
+  await audit(
+    env,
+    user.id,
+    "apply",
+    "rotation",
+    null,
+    `Áp dụng tua cho tháng ${month}: ${planned.length} phân công, giữ lại ${restored} người đã điền`
   );
-  if (postDuty.length > 0) {
-    const details = postDuty
-      .map((row) => `${formatDate(postDutyOffDate(row.date))} (ra trực ca ngày ${formatDate(row.date)})`)
-      .join(", ");
-    throw new HttpError(400, `Không thể xin nghỉ phép vì nhân sự có lịch ra trực: ${details}`);
-  }
-}
-
-async function cancelLeave(env: Env, user: User, id: number): Promise<Response> {
-  const row = await env.DB.prepare(
-    `SELECT lr.id, lr.staff_id, s.name
-     FROM leave_requests lr JOIN staff s ON s.id = lr.staff_id
-     WHERE lr.id = ? AND lr.status = 'approved'`
-  ).bind(id).first<{ id: number; staff_id: number; name: string }>();
-  if (!row) throw new HttpError(404, "Không tìm thấy đơn nghỉ phép.");
-  if (user.role !== "admin" && user.staffId !== row.staff_id) {
-    throw new HttpError(403, "Chỉ được hủy nghỉ phép của chính mình.");
-  }
-  await env.DB.prepare(
-    `UPDATE leave_requests SET status = 'cancelled', decision = 'cancelled',
-       decided_at = CURRENT_TIMESTAMP, decided_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-  )
-    .bind(user.id, id)
-    .run();
-  await env.DB.prepare("DELETE FROM leave_days WHERE request_id = ?").bind(id).run();
-  await audit(env, user.id, "cancel", "leave", id, `Hủy nghỉ phép: ${row.name}`);
-  return json({ ok: true });
-}
-
-async function cancelLeaveDay(env: Env, user: User, id: number): Promise<Response> {
-  const row = await env.DB.prepare(
-    `SELECT ld.id, ld.request_id, ld.staff_id, ld.date, s.name
-     FROM leave_days ld
-     JOIN leave_requests lr ON lr.id = ld.request_id
-     JOIN staff s ON s.id = ld.staff_id
-     WHERE ld.id = ? AND lr.status = 'approved'`
-  ).bind(id).first<{ id: number; request_id: number; staff_id: number; date: string; name: string }>();
-  if (!row) throw new HttpError(404, "Không tìm thấy ngày nghỉ phép.");
-  if (user.role !== "admin" && user.staffId !== row.staff_id) {
-    throw new HttpError(403, "Chỉ được hủy nghỉ phép của chính mình.");
-  }
-  if (user.role !== "admin" && row.date < todayInVietnam()) {
-    throw new HttpError(400, "Ngày nghỉ đã qua, không thể tự hủy. Vui lòng liên hệ admin nếu cần chỉnh dữ liệu.");
-  }
-  await env.DB.prepare("DELETE FROM leave_days WHERE id = ?").bind(id).run();
-  const remaining = await env.DB.prepare("SELECT COUNT(*) AS count FROM leave_days WHERE request_id = ?")
-    .bind(row.request_id)
-    .first<{ count: number }>();
-  if ((remaining?.count || 0) === 0) {
-    await env.DB.prepare(
-      `UPDATE leave_requests SET status = 'cancelled', decision = 'cancelled',
-       decided_at = CURRENT_TIMESTAMP, decided_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-    )
-      .bind(user.id, row.request_id)
-      .run();
-  }
-  await audit(env, user.id, "cancel", "leave_day", id, `Hủy nghỉ phép ${row.name}: ${row.date}`);
-  return json({ ok: true });
+  return json({ ok: true, created: planned.length, restored });
 }
 
 async function getAudit(env: Env, url: URL, user: User): Promise<Response> {
-  const weekStart = normalizeWeekStart(url.searchParams.get("weekStart"));
-  const days = getWeekDays(weekStart);
-  const filters = auditFiltersForUser(user, url);
-  return json({ auditLogs: await listAuditLogs(env, days[0], days[6], filters) });
+  const month = normalizeMonth(url.searchParams.get("month"));
+  const { from, to } = monthRange(month);
+  const logs = await listAuditLogs(env, from, to, auditFiltersForUser(user, url));
+  return json({ auditLogs: logs });
 }
 
 async function deleteAuditEndpoint(env: Env, url: URL, user: User): Promise<Response> {
   requireAdmin(user);
-  const weekStart = normalizeWeekStart(url.searchParams.get("weekStart"));
-  const days = getWeekDays(weekStart);
-
-  await env.DB.prepare(
-    `DELETE FROM audit_logs
-     WHERE created_at >= (?::date AT TIME ZONE 'Asia/Ho_Chi_Minh')
-       AND created_at < ((?::date + 1) AT TIME ZONE 'Asia/Ho_Chi_Minh')`
-  ).bind(days[0], days[6]).run();
-
-  await audit(env, user.id, "delete", "audit_log", null, `Xóa lịch sử thay đổi tuần ${weekStart}`);
+  const month = normalizeMonth(url.searchParams.get("month"));
+  const { from, to } = monthRange(month);
+  await env.DB.prepare("DELETE FROM audit_logs WHERE created_at >= ? AND created_at < ?")
+    .bind(`${from}T00:00:00Z`, `${addDays(to, 1)}T00:00:00Z`)
+    .run();
+  await audit(env, user.id, "delete", "audit", null, `Xóa lịch sử thay đổi tháng ${month}`);
   return json({ ok: true });
 }
 
-function auditFiltersForUser(user: User, url?: URL): { actor?: string; action?: string; q?: string; actorUserId?: number; relatedUserId?: number; relatedStaffId?: number } {
-  if (user.role !== "admin") return { relatedUserId: user.id, relatedStaffId: user.staffId ?? undefined };
+function auditFiltersForUser(user: User, url?: URL): {
+  actor?: string;
+  action?: string;
+  q?: string;
+  actorUserId?: number;
+} {
+  if (user.role === "khoa_phong") return { actorUserId: user.id };
   return {
-    actor: url?.searchParams.get("actor")?.trim() || undefined,
-    action: url?.searchParams.get("action")?.trim() || undefined,
-    q: url?.searchParams.get("q")?.trim() || undefined
+    actor: url?.searchParams.get("actor") || undefined,
+    action: url?.searchParams.get("action") || undefined,
+    q: url?.searchParams.get("q") || undefined
   };
-}
-
-async function listUnits(env: Env): Promise<ScheduleUnit[]> {
-  const { results } = await env.DB.prepare(
-    `SELECT id, code, section, label, type, max_per_day, sort_order, computed
-     FROM schedule_units ORDER BY sort_order`
-  ).all<UnitRow>();
-  return results.map(mapUnitRow);
-}
-
-async function listRotations(env: Env): Promise<UnitRotation[]> {
-  const { results } = await env.DB.prepare(
-    `SELECT ur.unit_id, ur.start_date, ur.mode, ur.enabled, urm.turn_index, urm.member_order,
-            s.id AS staff_id, s.name AS staff_name, s.type AS staff_type
-     FROM unit_rotations ur
-     LEFT JOIN unit_rotation_members urm ON urm.unit_id = ur.unit_id
-     LEFT JOIN staff s ON s.id = urm.staff_id
-     WHERE ur.enabled = 1
-     ORDER BY ur.unit_id, urm.turn_index, urm.member_order`
-  ).all<RotationRow>();
-  const map = new Map<number, UnitRotation>();
-  for (const row of results) {
-    if (!map.has(row.unit_id)) {
-      map.set(row.unit_id, { unitId: row.unit_id, startDate: row.start_date, mode: row.mode, enabled: !!row.enabled, turns: [] });
-    }
-    if (row.staff_id && row.turn_index !== null) {
-      const rotation = map.get(row.unit_id)!;
-      if (!rotation.turns[row.turn_index]) rotation.turns[row.turn_index] = [];
-      rotation.turns[row.turn_index].push({
-        staffId: row.staff_id,
-        staffName: row.staff_name,
-        staffType: row.staff_type,
-        turnIndex: row.turn_index,
-        memberOrder: row.member_order
-      });
-    }
-  }
-  return [...map.values()].map((rotation) => ({
-    ...rotation,
-    turns: rotation.turns.filter((turn) => Array.isArray(turn) && turn.length > 0)
-  }));
-}
-
-async function getUnitById(env: Env, id: number): Promise<ScheduleUnit> {
-  const row = await env.DB.prepare(
-    "SELECT id, code, section, label, type, max_per_day, sort_order, computed FROM schedule_units WHERE id = ?"
-  ).bind(id).first<UnitRow>();
-  if (!row) throw new HttpError(404, "Không tìm thấy hàng lịch.");
-  return mapUnitRow(row);
-}
-
-async function getStaffById(env: Env, id: number): Promise<Staff> {
-  const row = await env.DB.prepare("SELECT id, family_middle_name, name, type, active FROM staff WHERE id = ?").bind(id).first<StaffRow>();
-  if (!row) throw new HttpError(404, "Không tìm thấy nhân sự.");
-  return mapStaffRow(row);
-}
-
-async function listAssignments(env: Env, dates: string[]): Promise<Assignment[]> {
-  const start = dates[0];
-  const end = dates[dates.length - 1];
-  const { results } = await env.DB.prepare(
-    `SELECT a.id, a.unit_id, u.code AS unit_code, a.date, a.staff_id, s.name AS staff_name, s.type AS staff_type, a.slot
-     FROM schedule_assignments a
-     JOIN schedule_units u ON u.id = a.unit_id
-     JOIN staff s ON s.id = a.staff_id
-     WHERE a.date BETWEEN ? AND ?
-     ORDER BY a.date, u.sort_order, a.slot`
-  ).bind(start, end).all<AssignmentRow>();
-  return results.map(mapAssignmentRow);
-}
-
-async function listLeaveDays(env: Env, dates: string[], rawRange = false): Promise<LeaveDay[]> {
-  const start = dates[0];
-  const end = rawRange ? dates[1] : dates[dates.length - 1];
-  const { results } = await env.DB.prepare(
-    `SELECT ld.id, ld.request_id, ld.date, ld.staff_id, s.name AS staff_name, ld.staff_type, lr.reason, lr.created_at
-     FROM leave_days ld
-     JOIN leave_requests lr ON lr.id = ld.request_id
-     JOIN staff s ON s.id = ld.staff_id
-     WHERE ld.date BETWEEN ? AND ? AND lr.status = 'approved'
-     ORDER BY ld.date, ld.staff_type, s.name`
-  ).bind(start, end).all<LeaveDayRow>();
-  return results.map(mapLeaveDayRow);
 }
 
 async function listAuditLogs(
   env: Env,
-  start: string,
-  end: string,
-  filters: { actor?: string; action?: string; q?: string; actorUserId?: number; relatedUserId?: number; relatedStaffId?: number } = {}
+  from: string,
+  to: string,
+  filters: { actor?: string; action?: string; q?: string; actorUserId?: number }
 ): Promise<AuditLog[]> {
-  const where = [
-    "al.created_at >= (?::date AT TIME ZONE 'Asia/Ho_Chi_Minh')",
-    "al.created_at < ((?::date + 1) AT TIME ZONE 'Asia/Ho_Chi_Minh')"
-  ];
-  const params: unknown[] = [start, end];
-  if (filters.actorUserId) {
-    where.push("al.actor_user_id = ?");
-    params.push(filters.actorUserId);
-  }
-  if (filters.relatedUserId) {
-    if (filters.relatedStaffId) {
-      where.push(`(
-        al.actor_user_id = ? OR (
-          al.entity_type = 'leave' AND al.action IN ('approve', 'reject') AND EXISTS (
-            SELECT 1 FROM leave_requests lr
-            WHERE lr.id = al.entity_id AND (lr.created_by = ? OR lr.staff_id = ?)
-          )
-        )
-      )`);
-      params.push(filters.relatedUserId, filters.relatedUserId, filters.relatedStaffId);
-    } else {
-      where.push("al.actor_user_id = ?");
-      params.push(filters.relatedUserId);
-    }
+  const conditions = ["a.created_at >= ?", "a.created_at < ?"];
+  const bindings: unknown[] = [`${from}T00:00:00Z`, `${addDays(to, 1)}T00:00:00Z`];
+
+  if (filters.actorUserId !== undefined) {
+    conditions.push("a.actor_user_id = ?");
+    bindings.push(filters.actorUserId);
   }
   if (filters.actor) {
-    where.push("u.username LIKE ?");
-    params.push(`%${filters.actor}%`);
+    conditions.push("lower(u.username) LIKE lower(?)");
+    bindings.push(`%${filters.actor}%`);
   }
   if (filters.action) {
-    const actionValues = getAuditActionValues(filters.action);
-    where.push(`al.action IN (${actionValues.map(() => "?").join(", ")})`);
-    params.push(...actionValues);
+    const actions = getAuditActionValues(filters.action);
+    conditions.push(`a.action IN (${actions.map(() => "?").join(", ")})`);
+    bindings.push(...actions);
   }
   if (filters.q) {
-    where.push("(al.summary LIKE ? OR al.entity_type LIKE ?)");
-    params.push(`%${filters.q}%`, `%${filters.q}%`);
+    conditions.push("lower(a.summary) LIKE lower(?)");
+    bindings.push(`%${filters.q}%`);
   }
+
   const { results } = await env.DB.prepare(
-    `SELECT al.id, u.username AS actor_username, al.action, al.entity_type, al.entity_id, al.summary, al.created_at
-     FROM audit_logs al
-     LEFT JOIN users u ON u.id = al.actor_user_id
-     WHERE ${where.join(" AND ")}
-     ORDER BY al.created_at DESC, al.id DESC
-     LIMIT 100`
-  ).bind(...params).all<AuditRow>();
+    `SELECT a.id, u.username AS actor_username, a.action, a.entity_type, a.entity_id, a.summary, a.created_at
+     FROM audit_logs a
+     LEFT JOIN users u ON u.id = a.actor_user_id
+     WHERE ${conditions.join(" AND ")}
+     ORDER BY a.created_at DESC, a.id DESC
+     LIMIT 300`
+  ).bind(...bindings).all<AuditRow>();
   return results.map(mapAuditRow);
 }
 
@@ -1617,65 +1501,323 @@ async function audit(
   entityType: string,
   entityId: number | null,
   summary: string,
-  payload?: unknown
+  payload: string | null = null
 ): Promise<void> {
   await env.DB.prepare(
     "INSERT INTO audit_logs (actor_user_id, action, entity_type, entity_id, summary, payload) VALUES (?, ?, ?, ?, ?, ?)"
-  ).bind(actorUserId, action, entityType, entityId, summary, payload ? JSON.stringify(payload) : null).run();
+  ).bind(actorUserId, action, entityType, entityId, summary, payload).run();
 }
 
-function nextSlot(assignments: Assignment[], unitId: number, date: string): number {
-  const used = new Set(assignments.filter((a) => a.unitId === unitId && a.date === date).map((a) => a.slot));
-  let slot = 0;
-  while (used.has(slot)) slot += 1;
-  return slot;
+async function getDepartmentById(env: Env, id: number): Promise<Department> {
+  const row = await env.DB.prepare("SELECT id, name, active, sort_order FROM departments WHERE id = ?")
+    .bind(id)
+    .first<DepartmentRow>();
+  if (!row) throw new HttpError(404, "Không tìm thấy khoa phòng.");
+  return mapDepartmentRow(row);
 }
 
-async function assertStaffMatchesRole(env: Env, staffId: number, role: Role): Promise<void> {
-  if (role === "admin") return;
-  const staff = await getStaffById(env, staffId);
-  if (
-    (role === "bs" && staff.type !== "BS") ||
-    (role === "ktv" && staff.type !== "KTV") ||
-    (role === "tkyk" && staff.type !== "TKYK")
-  ) {
-    throw new HttpError(400, "Role không khớp loại nhân sự.");
+async function getSettingsEndpoint(env: Env, user: User): Promise<Response> {
+  requireAdmin(user);
+  return json(await getSettings(env));
+}
+
+async function saveSettingsEndpoint(request: Request, env: Env, user: User): Promise<Response> {
+  requireAdmin(user);
+  const body = await readJson<Partial<SystemSettings>>(request);
+  const statements: PostgresPreparedStatement[] = [];
+  const upsert = (key: string, value: boolean) =>
+    env.DB.prepare(
+      "INSERT INTO system_settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+    ).bind(key, value ? "1" : "0");
+
+  if (body.lock_person_on_workday !== undefined) {
+    statements.push(upsert("lock_person_on_workday", body.lock_person_on_workday));
   }
+  if (statements.length) await env.DB.batch(statements);
+  await audit(env, user.id, "update", "settings", null, "Cập nhật cấu hình hệ thống");
+  return json(await getSettings(env));
 }
 
-export function usernameAvailabilityLookup(
-  username: string,
-  exceptUserId?: number
-): { sql: string; bindings: Array<string | number> } {
-  return exceptUserId === undefined
-    ? {
-        sql: "SELECT id FROM users WHERE lower(username) = lower(?)",
-        bindings: [username]
-      }
-    : {
-        sql: "SELECT id FROM users WHERE lower(username) = lower(?) AND id <> ?",
-        bindings: [username, exceptUserId]
-      };
+async function getSettings(env: Env): Promise<SystemSettings> {
+  const { results } = await env.DB.prepare("SELECT key, value FROM system_settings").all<{ key: string; value: string }>();
+  const map = new Map((results || []).map((row) => [row.key, row.value]));
+  return {
+    lock_person_on_workday: map.get("lock_person_on_workday") === "1"
+  };
 }
 
-async function assertUsernameAvailable(env: Env, username: string, exceptUserId?: number): Promise<void> {
-  const lookup = usernameAvailabilityLookup(username, exceptUserId);
-  const row = await env.DB.prepare(lookup.sql).bind(...lookup.bindings).first<{ id: number }>();
-  if (row) throw new HttpError(400, "Username đã tồn tại.");
+async function getReportEndpoint(env: Env, url: URL, user: User): Promise<Response> {
+  const date = url.searchParams.get("date") || "";
+  if (!isIsoDate(date)) throw new HttpError(400, "Thiếu ngày làm việc.");
+
+  const workDay = await env.DB.prepare("SELECT date, session, note FROM work_days WHERE date = ?")
+    .bind(date)
+    .first<WorkDayRow>();
+  if (!workDay) throw new HttpError(404, `Ngày ${formatFullDate(date)} không phải ngày làm việc.`);
+
+  const row = await env.DB.prepare("SELECT * FROM work_reports WHERE date = ?").bind(date).first<Record<string, any>>();
+  const [attendance, dayCoordinators] = await Promise.all([
+    listAttendance(env, date),
+    listCoordinatorAssignments(env, date, date)
+  ]);
+  const canSign = user.role === "khoa_phong"
+    ? attendance.some((entry) => entry.departmentId === user.departmentId)
+    : user.role === "admin" || dayCoordinators.some((item) => item.userId === user.id);
+
+  return json({
+    report: row ? mapReportRow(row, workDay.session, attendance) : null,
+    workDay: mapWorkDayRow(workDay),
+    attendance,
+    coordinators: dayCoordinators,
+    canSign
+  });
+}
+
+async function listAttendance(env: Env, date: string): Promise<AttendanceEntry[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT a.department_id, d.name AS department_name, a.person_name, a.person_phone,
+            att.present, att.note, att.signature, att.signature_name, att.signature_at
+     FROM assignments a
+     JOIN departments d ON d.id = a.department_id
+     LEFT JOIN work_report_attendance att ON att.date = a.date AND att.department_id = a.department_id
+     WHERE a.date = ?
+     ORDER BY a.member_order, d.sort_order, d.name`
+  ).bind(date).all<AttendanceRow>();
+  return results.map(mapAttendanceRow);
+}
+
+async function listReportsEndpoint(env: Env): Promise<Response> {
+  const { results } = await env.DB.prepare(
+    `SELECT w.date, w.session, COALESCE(r.report_time, '') AS report_time,
+            COUNT(a.id) AS total_count,
+            COALESCE(SUM(CASE WHEN att.present = 1 THEN 1 ELSE 0 END), 0) AS present_count
+     FROM work_days w
+     LEFT JOIN work_reports r ON r.date = w.date
+     LEFT JOIN assignments a ON a.date = w.date
+     LEFT JOIN work_report_attendance att ON att.date = w.date AND att.department_id = a.department_id
+     GROUP BY w.date, w.session, r.report_time
+     ORDER BY w.date DESC
+     LIMIT 120`
+  ).all();
+  return json({ reports: results });
+}
+
+async function saveReportEndpoint(request: Request, env: Env, user: User): Promise<Response> {
+  requireScheduler(user);
+  const body = await readJson<Partial<WorkReport>>(request);
+  const date = String(body.date || "").trim();
+  const reportDate = String(body.reportDate || "").trim();
+  const reportTime = String(body.reportTime || "").trim();
+  if (!isIsoDate(date) || !isIsoDate(reportDate) || !reportTime) {
+    throw new HttpError(400, "Ngày làm, ngày báo cáo hoặc giờ báo cáo không hợp lệ.");
+  }
+
+  const workDay = await env.DB.prepare("SELECT date FROM work_days WHERE date = ?").bind(date).first();
+  if (!workDay) throw new HttpError(404, `Ngày ${formatFullDate(date)} không phải ngày làm việc.`);
+
+  const counts = [body.soLuotKham, body.soHoSo].map((value) => Number(value ?? 0));
+  if (counts.some((value) => !Number.isInteger(value) || value < 0)) {
+    throw new HttpError(400, "Số liệu công việc phải là số nguyên không âm.");
+  }
+
+  const existing = await env.DB.prepare(
+    "SELECT date, signature_dieu_phoi FROM work_reports WHERE date = ?"
+  ).bind(date).first<{ date: string; signature_dieu_phoi: string | null }>();
+
+  if (existing?.signature_dieu_phoi && user.role !== "admin") {
+    throw new HttpError(409, "Báo cáo đã được điều phối ký chốt, chỉ quản lý mới sửa được.");
+  }
+
+  const values = [
+    reportDate,
+    reportTime,
+    ...counts,
+    String(body.vatTu || ""),
+    String(body.suCo || ""),
+    String(body.deXuat || "")
+  ];
+
+  if (existing) {
+    const updated = await env.DB.prepare(
+      `UPDATE work_reports SET report_date = ?, report_time = ?, so_luot_kham = ?, so_ho_so = ?,
+         vat_tu = ?, su_co = ?, de_xuat = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE date = ?`
+    ).bind(...values, date).run();
+    if ((updated.meta.changes || 0) !== 1) {
+      throw new HttpError(409, "Báo cáo vừa thay đổi. Vui lòng tải lại và lưu lại.");
+    }
+    await audit(env, user.id, "update", "work_report", null, `Cập nhật báo cáo làm việc ngày ${formatFullDate(date)}`);
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO work_reports (date, report_date, report_time, so_luot_kham, so_ho_so, vat_tu, su_co, de_xuat)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(date, ...values).run();
+    await audit(env, user.id, "create", "work_report", null, `Tạo báo cáo làm việc ngày ${formatFullDate(date)}`);
+  }
+
+  return json({ ok: true });
+}
+
+async function saveAttendanceEndpoint(request: Request, env: Env, user: User): Promise<Response> {
+  const body = await readJson<{
+    date?: string;
+    departmentId?: number;
+    present?: boolean;
+    note?: string;
+    signature?: string;
+    signerName?: string;
+    useStoredSignature?: boolean;
+  }>(request);
+  const date = String(body.date || "").trim();
+  if (!isIsoDate(date)) throw new HttpError(400, "Ngày làm việc không hợp lệ.");
+
+  const departmentId = canManageSchedule(user.role) ? Number(body.departmentId || 0) : Number(user.departmentId || 0);
+  if (!departmentId) throw new HttpError(400, "Thiếu khoa phòng điểm danh.");
+  if (!canManageSchedule(user.role) && user.departmentId !== departmentId) {
+    throw new HttpError(403, "Chỉ khoa phòng của mình mới được điểm danh và ký tên.");
+  }
+
+  const assignment = await env.DB.prepare(
+    `SELECT a.id, d.name AS department_name
+     FROM assignments a JOIN departments d ON d.id = a.department_id
+     WHERE a.date = ? AND a.department_id = ?`
+  ).bind(date, departmentId).first<{ id: number; department_name: string }>();
+  if (!assignment) throw new HttpError(404, "Khoa phòng này không được phân công ngày đã chọn.");
+
+  const reportExists = await env.DB.prepare("SELECT date FROM work_reports WHERE date = ?").bind(date).first();
+  if (!reportExists) throw new HttpError(409, "Điều phối cần tạo báo cáo làm việc của ngày này trước.");
+
+  const note = String(body.note || "").trim() || null;
+  const wantsSignature = body.useStoredSignature || Boolean(body.signature);
+  let signature: string | null = null;
+  let signerName: string | null = null;
+
+  if (wantsSignature) {
+    signature = body.useStoredSignature ? (user.signature ?? null) : (body.signature ?? null);
+    if (!signature || !isSignatureDataUrl(signature)) {
+      throw new HttpError(400, body.useStoredSignature ? "Tài khoản chưa có chữ ký mẫu hợp lệ." : "Chữ ký không hợp lệ.");
+    }
+    signerName = resolveSignerName(body.signerName, user.fullName || user.departmentName);
+    if (!signerName) throw new HttpError(400, "Hãy nhập họ và tên người ký.");
+    if (signerName.length > 120) throw new HttpError(400, "Họ và tên người ký không được quá 120 ký tự.");
+  }
+
+  const present = body.present === undefined ? true : Boolean(body.present);
+
+  if (wantsSignature) {
+    await env.DB.prepare(
+      `INSERT INTO work_report_attendance
+         (date, department_id, present, note, signature, signature_name, signature_at, signature_user_id, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(date, department_id) DO UPDATE SET
+         present = excluded.present, note = excluded.note, signature = excluded.signature,
+         signature_name = excluded.signature_name, signature_at = CURRENT_TIMESTAMP,
+         signature_user_id = excluded.signature_user_id, updated_at = CURRENT_TIMESTAMP`
+    ).bind(date, departmentId, present ? 1 : 0, note, signature, signerName, user.id).run();
+    await audit(
+      env,
+      user.id,
+      "sign",
+      "work_report",
+      null,
+      `${assignment.department_name} ký báo cáo làm việc ngày ${formatFullDate(date)}: ${signerName}`
+    );
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO work_report_attendance (date, department_id, present, note, updated_at)
+       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(date, department_id) DO UPDATE SET
+         present = excluded.present, note = excluded.note, updated_at = CURRENT_TIMESTAMP`
+    ).bind(date, departmentId, present ? 1 : 0, note).run();
+    await audit(
+      env,
+      user.id,
+      "attendance",
+      "work_report",
+      null,
+      `Điểm danh ${assignment.department_name} ngày ${formatFullDate(date)}: ${present ? "có mặt" : "vắng"}`
+    );
+  }
+
+  return json({ ok: true });
+}
+
+async function signReportEndpoint(request: Request, env: Env, user: User): Promise<Response> {
+  const body = await readJson<{
+    date?: string;
+    role?: unknown;
+    signature?: string;
+    signerName?: string;
+    useStoredSignature?: boolean;
+  }>(request);
+  const date = String(body.date || "").trim();
+  if (!isIsoDate(date) || !isSignerRole(body.role)) {
+    throw new HttpError(400, "Ngày làm việc hoặc vai trò ký không hợp lệ.");
+  }
+  if (body.role === "khoa_phong") {
+    return saveAttendanceEndpoint(
+      new Request(request.url, { method: "POST", body: JSON.stringify({ ...body, present: true }) }),
+      env,
+      user
+    );
+  }
+  requireScheduler(user);
+
+  // Điều phối chỉ ký chốt ngày mình phụ trách; admin ký thay được mọi ngày.
+  if (user.role === "dieu_phoi") {
+    const assigned = await env.DB.prepare(
+      "SELECT id FROM coordinator_assignments WHERE date = ? AND user_id = ?"
+    ).bind(date, user.id).first();
+    if (!assigned) throw new HttpError(403, "Chỉ điều phối phụ trách ngày này mới được ký chốt báo cáo.");
+  }
+
+  const reportExists = await env.DB.prepare("SELECT date FROM work_reports WHERE date = ?").bind(date).first();
+  if (!reportExists) throw new HttpError(409, "Hãy lưu báo cáo trước khi ký.");
+
+  const signature = body.useStoredSignature ? user.signature : body.signature;
+  if (!signature || !isSignatureDataUrl(signature)) {
+    throw new HttpError(400, body.useStoredSignature ? "Tài khoản chưa có chữ ký mẫu hợp lệ." : "Chữ ký không hợp lệ.");
+  }
+  const name = resolveSignerName(body.signerName, user.fullName || user.username);
+  if (!name) throw new HttpError(400, "Hãy nhập họ và tên người ký.");
+  if (name.length > 120) throw new HttpError(400, "Họ và tên người ký không được quá 120 ký tự.");
+
+  const signed = await env.DB.prepare(
+    `UPDATE work_reports SET signature_dieu_phoi = ?, signature_dieu_phoi_user_id = ?,
+       signature_dieu_phoi_name = ?, signature_dieu_phoi_at = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE date = ? AND signature_dieu_phoi IS NULL`
+  ).bind(signature, user.id, name, new Date().toISOString(), date).run();
+  if ((signed.meta.changes || 0) !== 1) throw new HttpError(409, "Báo cáo này đã được ký chốt trước đó.");
+
+  await audit(env, user.id, "sign", "work_report", null, `Điều phối ký chốt báo cáo ngày ${formatFullDate(date)}: ${name}`);
+  return json({ ok: true });
+}
+
+async function deleteReportEndpoint(env: Env, url: URL, user: User): Promise<Response> {
+  requireAdmin(user);
+  const date = url.searchParams.get("date") || "";
+  if (!isIsoDate(date)) throw new HttpError(400, "Thiếu ngày làm việc.");
+
+  const result = await env.DB.batch([
+    env.DB.prepare("DELETE FROM work_report_attendance WHERE date = ?").bind(date),
+    env.DB.prepare("DELETE FROM work_reports WHERE date = ?").bind(date)
+  ]);
+  if ((result[1]?.meta.changes || 0) === 0) {
+    throw new HttpError(404, "Không tìm thấy báo cáo làm việc của ngày này.");
+  }
+
+  await audit(env, user.id, "delete", "work_report", null, `Xóa báo cáo làm việc ngày ${formatFullDate(date)}`);
+  return json({ ok: true });
 }
 
 function idFromPath(path: string): number {
-  const value = Number(path.split("/").pop());
-  if (!Number.isInteger(value) || value <= 0) throw new HttpError(400, "ID không hợp lệ.");
-  return value;
+  const id = Number(path.split("/").pop());
+  if (!Number.isInteger(id) || id <= 0) throw new HttpError(400, "ID không hợp lệ.");
+  return id;
 }
 
-function isRole(value: unknown): value is Role {
-  return value === "admin" || value === "bs" || value === "ktv" || value === "tkyk";
-}
-
-function isStaffType(value: unknown): value is StaffType {
-  return value === "BS" || value === "KTV" || value === "TKYK";
+function dateFromPath(path: string): string {
+  return (path.split("/").pop() || "").slice(0, 10);
 }
 
 async function readJson<T>(request: Request): Promise<T> {
@@ -1722,9 +1864,9 @@ function publicUser(user: User): User {
     id: user.id,
     username: user.username,
     role: user.role,
-    staffId: user.staffId,
-    staffName: user.staffName ?? null,
-    staffFullName: user.staffFullName ?? null,
+    departmentId: user.departmentId,
+    departmentName: user.departmentName ?? null,
+    fullName: user.fullName ?? null,
     signature: user.signature ?? null,
     hasSignature: !!user.signature
   };
@@ -1734,51 +1876,53 @@ interface UserRow {
   id: number;
   username: string;
   role: Role;
-  staff_id: number | null;
-  staff_name?: string | null;
-  staff_full_name?: string | null;
+  department_id: number | null;
+  department_name?: string | null;
+  full_name?: string | null;
   signature?: string | null;
 }
 
-interface StaffRow {
+interface DepartmentRow {
   id: number;
-  family_middle_name: string;
   name: string;
-  type: StaffType;
   active: number;
+  sort_order: number;
 }
 
-interface UnitRow {
-  id: number;
-  code: string;
-  section: "I" | "II" | "III";
-  label: string;
-  type: ScheduleUnit["type"];
-  max_per_day: number | null;
-  sort_order: number;
-  computed: number;
+interface WorkDayRow {
+  date: string;
+  session: DaySession;
+  note: string | null;
 }
 
 interface AssignmentRow {
   id: number;
-  unit_id: number;
-  unit_code: string;
   date: string;
-  staff_id: number;
-  staff_name: string;
-  staff_type: StaffType;
-  slot: number;
+  department_id: number;
+  department_name: string;
+  person_name: string;
+  person_phone: string;
+  updated_at: string | null;
 }
 
-interface LeaveDayRow {
+interface CoordinatorAssignmentRow {
   id: number;
-  request_id: number;
   date: string;
-  staff_id: number;
-  staff_name: string;
-  staff_type: StaffType;
-  reason: string | null;
-  created_at: string;
+  user_id: number;
+  username: string;
+  full_name: string | null;
+}
+
+interface AttendanceRow {
+  department_id: number;
+  department_name: string;
+  person_name: string;
+  person_phone: string;
+  present: number | null;
+  note: string | null;
+  signature: string | null;
+  signature_name: string | null;
+  signature_at: string | null;
 }
 
 interface AuditRow {
@@ -1791,76 +1935,68 @@ interface AuditRow {
   created_at: string;
 }
 
-interface RotationRow {
-  unit_id: number;
-  start_date: string;
-  mode: "daily" | "weekly";
-  enabled: number;
-  turn_index: number | null;
-  member_order: number;
-  staff_id: number | null;
-  staff_name: string;
-  staff_type: StaffType;
-}
-
 function mapUserRow(row: UserRow): User {
   return {
     id: row.id,
     username: row.username,
     role: row.role,
-    staffId: row.staff_id,
-    staffName: row.staff_name ?? null,
-    staffFullName: row.staff_full_name ?? null,
+    departmentId: row.department_id,
+    departmentName: row.department_name ?? null,
+    fullName: row.full_name ?? null,
     signature: row.signature ?? null
   };
 }
 
-function mapStaffRow(row: StaffRow): Staff {
+function mapDepartmentRow(row: DepartmentRow): Department {
   return {
     id: row.id,
-    familyMiddleName: row.family_middle_name,
     name: row.name,
-    type: row.type,
-    active: !!row.active
+    active: !!row.active,
+    sortOrder: row.sort_order
   };
 }
 
-function mapUnitRow(row: UnitRow): ScheduleUnit {
+function mapWorkDayRow(row: WorkDayRow): WorkDay {
   return {
-    id: row.id,
-    code: row.code,
-    section: row.section,
-    label: row.label,
-    type: row.type,
-    maxPerDay: row.max_per_day,
-    sortOrder: row.sort_order,
-    computed: !!row.computed
+    date: row.date,
+    session: row.session,
+    note: row.note ?? null
   };
 }
 
 function mapAssignmentRow(row: AssignmentRow): Assignment {
   return {
     id: row.id,
-    unitId: row.unit_id,
-    unitCode: row.unit_code,
     date: row.date,
-    staffId: row.staff_id,
-    staffName: row.staff_name,
-    staffType: row.staff_type,
-    slot: row.slot
+    departmentId: row.department_id,
+    departmentName: row.department_name,
+    personName: row.person_name || "",
+    personPhone: row.person_phone || "",
+    updatedAt: row.updated_at
   };
 }
 
-function mapLeaveDayRow(row: LeaveDayRow): LeaveDay {
+function mapCoordinatorAssignmentRow(row: CoordinatorAssignmentRow): CoordinatorAssignment {
   return {
     id: row.id,
-    requestId: row.request_id,
     date: row.date,
-    staffId: row.staff_id,
-    staffName: row.staff_name,
-    staffType: row.staff_type,
-    reason: row.reason,
-    registeredAt: row.created_at
+    userId: row.user_id,
+    username: row.username,
+    fullName: (row.full_name || "").trim()
+  };
+}
+
+function mapAttendanceRow(row: AttendanceRow): AttendanceEntry {
+  return {
+    departmentId: row.department_id,
+    departmentName: row.department_name,
+    personName: row.person_name || "",
+    personPhone: row.person_phone || "",
+    present: !!row.present,
+    note: row.note ?? null,
+    signature: row.signature ?? null,
+    signatureName: row.signature_name ?? null,
+    signatureAt: row.signature_at ?? null
   };
 }
 
@@ -1876,605 +2012,21 @@ function mapAuditRow(row: AuditRow): AuditLog {
   };
 }
 
-async function getSettings(env: Env) {
-  const { results } = await env.DB.prepare("SELECT key, value FROM system_settings").all<{ key: string; value: string }>();
-  const map = new Map<string, string>();
-  for (const row of results || []) {
-    map.set(row.key, row.value);
-  }
-  return {
-    approve_leave_bs: map.get("approve_leave_bs") === "1",
-    approve_leave_ktv: map.get("approve_leave_ktv") === "1",
-    approve_swap: map.get("approve_swap") === "1",
-    show_staff_rail: map.get("show_staff_rail") !== "0",
-    show_leave_month_calendar: map.get("show_leave_month_calendar") === "1"
-  };
-}
-
-async function getBlockedDates(env: Env): Promise<string[]> {
-  const { results } = await env.DB.prepare("SELECT date FROM blocked_leave_days ORDER BY date").all<{ date: string }>();
-  return (results || []).map((r) => r.date);
-}
-
-async function listPendingLeaves(env: Env, dates: string[], user: User): Promise<Array<{ id: number; staffId: number; staffName: string; staffType: StaffType; reason: string | null; dates: string[] }>> {
-  const start = dates[0];
-  const end = dates[dates.length - 1];
-  if (user.role !== "admin" && !user.staffId) return [];
-  const pendingFilter = user.role === "admin"
-    ? ""
-    : " AND ld.date BETWEEN ? AND ? AND lr.staff_id = ?";
-  const params: Array<string | number> = user.role === "admin" ? [] : [start, end, user.staffId!];
-  const { results } = await env.DB.prepare(
-    `SELECT lr.id, lr.staff_id, s.name AS staff_name, s.type AS staff_type, lr.reason, ld.date
-     FROM leave_requests lr
-     JOIN staff s ON s.id = lr.staff_id
-     JOIN leave_days ld ON ld.request_id = lr.id
-     WHERE lr.status = 'pending'${pendingFilter}
-     ORDER BY lr.created_at, ld.date, s.name`
-  ).bind(...params).all<{ id: number; staff_id: number; staff_name: string; staff_type: StaffType; reason: string | null; date: string }>();
-
-  const map = new Map<number, { id: number; staffId: number; staffName: string; staffType: StaffType; reason: string | null; dates: string[] }>();
-  for (const row of results || []) {
-    if (!map.has(row.id)) {
-      map.set(row.id, {
-        id: row.id,
-        staffId: row.staff_id,
-        staffName: row.staff_name,
-        staffType: row.staff_type,
-        reason: row.reason,
-        dates: []
-      });
-    }
-    map.get(row.id)!.dates.push(row.date);
-  }
-  return [...map.values()];
-}
-
-async function getSettingsEndpoint(env: Env, user: User): Promise<Response> {
-  requireAdmin(user);
-  const settings = await getSettings(env);
-  const blockedDates = await getBlockedDates(env);
-  return json({ ...settings, blocked_dates: blockedDates });
-}
-
-async function saveSettingsEndpoint(request: Request, env: Env, user: User): Promise<Response> {
-  requireAdmin(user);
-  const body = await readJson<Partial<SystemSettings>>(request);
-  const statements: PostgresPreparedStatement[] = [];
-  if (body.approve_leave_bs !== undefined) {
-    statements.push(env.DB.prepare("INSERT INTO system_settings (key, value) VALUES ('approve_leave_bs', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value").bind(body.approve_leave_bs ? "1" : "0"));
-  }
-  if (body.approve_leave_ktv !== undefined) {
-    statements.push(env.DB.prepare("INSERT INTO system_settings (key, value) VALUES ('approve_leave_ktv', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value").bind(body.approve_leave_ktv ? "1" : "0"));
-  }
-  if (body.approve_swap !== undefined) {
-    statements.push(env.DB.prepare("INSERT INTO system_settings (key, value) VALUES ('approve_swap', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value").bind(body.approve_swap ? "1" : "0"));
-  }
-  if (body.show_staff_rail !== undefined) {
-    statements.push(env.DB.prepare("INSERT INTO system_settings (key, value) VALUES ('show_staff_rail', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value").bind(body.show_staff_rail ? "1" : "0"));
-  }
-  if (body.show_leave_month_calendar !== undefined) {
-    statements.push(env.DB.prepare("INSERT INTO system_settings (key, value) VALUES ('show_leave_month_calendar', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value").bind(body.show_leave_month_calendar ? "1" : "0"));
-  }
-  if (statements.length) {
-    await env.DB.batch(statements);
-  }
-  await audit(env, user.id, "update", "settings", null, "Cập nhật cài đặt hệ thống");
-  return json({ ok: true });
-}
-
-async function addBlockedDay(request: Request, env: Env, user: User): Promise<Response> {
-  requireAdmin(user);
-  const body = await readJson<{ date?: string }>(request);
-  const date = String(body.date || "").slice(0, 10);
-  if (!date) throw new HttpError(400, "Thiếu ngày cần chặn.");
-  await env.DB.prepare("INSERT INTO blocked_leave_days (date) VALUES (?) ON CONFLICT (date) DO NOTHING").bind(date).run();
-  await audit(env, user.id, "create", "blocked_leave_day", null, `Chặn nghỉ phép ngày: ${date}`);
-  return json({ ok: true });
-}
-
-async function deleteBlockedDay(env: Env, user: User, date: string): Promise<Response> {
-  requireAdmin(user);
-  if (!date) throw new HttpError(400, "Thiếu ngày cần xóa chặn.");
-  await env.DB.prepare("DELETE FROM blocked_leave_days WHERE date = ?").bind(date).run();
-  await audit(env, user.id, "delete", "blocked_leave_day", null, `Bỏ chặn nghỉ phép ngày: ${date}`);
-  return json({ ok: true });
-}
-
-async function approveLeave(env: Env, user: User, requestId: number): Promise<Response> {
-  requireAdmin(user);
-  const requestRow = await env.DB.prepare(
-    `SELECT lr.id, lr.staff_id, s.name AS staff_name, s.type AS staff_type, s.active
-     FROM leave_requests lr
-     JOIN staff s ON s.id = lr.staff_id
-     WHERE lr.id = ? AND lr.status = 'pending'`
-  ).bind(requestId).first<{ id: number; staff_id: number; staff_name: string; staff_type: StaffType; active: number }>();
-  if (!requestRow) throw new HttpError(404, "Không tìm thấy yêu cầu nghỉ phép chờ duyệt.");
-
-  const leaveDays = await env.DB.prepare(
-    "SELECT date FROM leave_days WHERE request_id = ? ORDER BY date"
-  ).bind(requestId).all<{ date: string }>();
-  const dates = (leaveDays.results || []).map((row) => row.date);
-  if (dates.length === 0) throw new HttpError(400, "Yêu cầu nghỉ phép không có ngày hợp lệ.");
-
-  const approvedLeaveDays = await listLeaveDays(env, [dates[0], dates[dates.length - 1]], true);
-  const validationMessage = validateLeaveInput({
-    staff: {
-      id: requestRow.staff_id,
-      familyMiddleName: "",
-      name: requestRow.staff_name,
-      type: requestRow.staff_type,
-      active: !!requestRow.active
-    },
-    dates,
-    leaveDays: approvedLeaveDays,
-    limitPerType: 2
-  });
-  if (validationMessage) throw new HttpError(409, validationMessage);
-  await assertNoDutyLeaveConflicts(env, requestRow.staff_id, dates);
-
-  const statements: PostgresPreparedStatement[] = [
-    env.DB.prepare(
-      `UPDATE leave_requests SET status = 'approved', decision = 'approved',
-       decided_at = CURRENT_TIMESTAMP, decided_by = ?, updated_at = CURRENT_TIMESTAMP
-       WHERE id = ? AND status = 'pending'`
-    ).bind(user.id, requestId)
-  ];
-
-  const placeholders = dates.map(() => "?").join(",");
-  statements.push(
-    env.DB.prepare(`
-      DELETE FROM schedule_assignments
-      WHERE staff_id = ?
-        AND date IN (${placeholders})
-        AND unit_id IN (SELECT id FROM schedule_units WHERE type IN ('work_bs', 'work_ktv'))
-    `).bind(requestRow.staff_id, ...dates)
-  );
-
-  const approvalResults = await env.DB.batch(statements);
-  if ((approvalResults[0]?.meta.changes || 0) !== 1) throw new HttpError(409, "Yêu cầu nghỉ phép đã được xử lý bởi một phiên khác.");
-  await audit(env, user.id, "approve", "leave", requestId, `Duyệt nghỉ phép cho ${requestRow.staff_name}: ${dates.join(", ")}`);
-  return json({ ok: true });
-}
-
-async function rejectLeave(env: Env, user: User, requestId: number): Promise<Response> {
-  requireAdmin(user);
-  const requestRow = await env.DB.prepare(
-    `SELECT lr.id, lr.staff_id, lr.requested_dates, s.name AS staff_name
-     FROM leave_requests lr
-     JOIN staff s ON s.id = lr.staff_id
-     WHERE lr.id = ? AND lr.status = 'pending'`
-  ).bind(requestId).first<{ id: number; staff_id: number; requested_dates: string | null; staff_name: string }>();
-  if (!requestRow) throw new HttpError(404, "Không tìm thấy yêu cầu nghỉ phép chờ duyệt.");
-
-  const rejectedDays = await env.DB.prepare("SELECT date FROM leave_days WHERE request_id = ? ORDER BY date")
-    .bind(requestId)
-    .all<{ date: string }>();
-  const dates = (rejectedDays.results || []).map((row) => row.date);
-  await env.DB.prepare(
-    `UPDATE leave_requests SET status = 'cancelled', decision = 'rejected', requested_dates = ?,
-     decided_at = CURRENT_TIMESTAMP, decided_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-  ).bind(requestRow.requested_dates || dates.join(","), user.id, requestId).run();
-  await env.DB.prepare("DELETE FROM leave_days WHERE request_id = ?").bind(requestId).run();
-  await audit(env, user.id, "reject", "leave", requestId, `Từ chối nghỉ phép của ${requestRow.staff_name}: ${dates.join(", ")}`);
-  return json({ ok: true });
-}
-
-interface SwapRequestRow {
-  id: number;
-  token: string;
-  status: string;
-  created_at: string;
-  expires_at: string | null;
-  creator_staff_id: number | null;
-  assignment_id_1: number;
-  staff_id_1: number;
-  unit_id_1: number;
-  date_1: string;
-  slot_1: number;
-  assignment_id_2: number;
-  staff_id_2: number;
-  unit_id_2: number;
-  date_2: string;
-  slot_2: number;
-}
-
-function requireSwapRecipient(row: SwapRequestRow, user: User): void {
-  if (user.role === "admin") return;
-  const intendedStaffId = row.creator_staff_id === row.staff_id_1
-    ? row.staff_id_2
-    : row.creator_staff_id === row.staff_id_2
-      ? row.staff_id_1
-      : null;
-  if (!user.staffId || user.staffId !== intendedStaffId) {
-    throw new HttpError(403, "Chỉ nhân sự nhận yêu cầu đổi trực mới được xác nhận.");
-  }
-}
-
-async function getSwapRequestPublic(env: Env, url: URL, user: User): Promise<Response> {
-  const token = url.searchParams.get("token") || "";
-  if (!token) throw new HttpError(400, "Thiếu token xác nhận.");
-
-  const row = await env.DB.prepare(
-    `SELECT sr.*, creator.staff_id AS creator_staff_id,
-            s1.name AS staff_name_1, u1.label AS unit_label_1,
-            s2.name AS staff_name_2, u2.label AS unit_label_2
-     FROM swap_requests sr
-     LEFT JOIN users creator ON creator.id = sr.created_by
-     JOIN staff s1 ON s1.id = sr.staff_id_1
-     JOIN schedule_units u1 ON u1.id = sr.unit_id_1
-     JOIN staff s2 ON s2.id = sr.staff_id_2
-     JOIN schedule_units u2 ON u2.id = sr.unit_id_2
-     WHERE sr.token = ?`
-  ).bind(token).first<SwapRequestRow & {
-    staff_name_1: string; unit_label_1: string;
-    staff_name_2: string; unit_label_2: string;
-  }>();
-
-  if (!row) throw new HttpError(404, "Yêu cầu đổi trực không tồn tại hoặc đã bị xóa.");
-  requireSwapRecipient(row, user);
-  if (row.status === "pending" && row.expires_at && Date.parse(row.expires_at) <= Date.now()) {
-    throw new HttpError(410, "Yêu cầu đổi trực đã hết hạn.");
-  }
-
-  return json({
-    id: row.id,
-    token: row.token,
-    status: row.status,
-    createdAt: row.created_at,
-    assignmentId1: row.assignment_id_1,
-    staffId1: row.staff_id_1,
-    staffName1: row.staff_name_1,
-    unitLabel1: row.unit_label_1,
-    date1: row.date_1,
-    slot1: row.slot_1,
-    assignmentId2: row.assignment_id_2,
-    staffId2: row.staff_id_2,
-    staffName2: row.staff_name_2,
-    unitLabel2: row.unit_label_2,
-    date2: row.date_2,
-    slot2: row.slot_2
-  });
-}
-
-async function acceptSwapPublic(env: Env, url: URL, user: User): Promise<Response> {
-  const token = url.searchParams.get("token") || "";
-  if (!token) throw new HttpError(400, "Thiếu token xác nhận.");
-
-  const row = await env.DB.prepare(
-    `SELECT sr.*, creator.staff_id AS creator_staff_id
-     FROM swap_requests sr
-     LEFT JOIN users creator ON creator.id = sr.created_by
-     WHERE sr.token = ? AND sr.status = 'pending'
-       AND (sr.expires_at IS NULL OR sr.expires_at > CURRENT_TIMESTAMP)`
-  ).bind(token).first<SwapRequestRow>();
-
-  if (!row) throw new HttpError(400, "Yêu cầu đổi trực đã được duyệt, từ chối hoặc không hợp lệ.");
-  requireSwapRecipient(row, user);
-
-  const [asg1, asg2] = await Promise.all([
-    env.DB.prepare("SELECT id, staff_id, unit_id, date, slot FROM schedule_assignments WHERE id = ?").bind(row.assignment_id_1).first<{ id: number; staff_id: number; unit_id: number; date: string; slot: number }>(),
-    env.DB.prepare("SELECT id, staff_id, unit_id, date, slot FROM schedule_assignments WHERE id = ?").bind(row.assignment_id_2).first<{ id: number; staff_id: number; unit_id: number; date: string; slot: number }>()
-  ]);
-
-  if (!asg1 || !asg2) {
-    throw new HttpError(400, "Một trong hai ca trực cần đổi đã bị xóa khỏi hệ thống.");
-  }
-
-  if (asg1.staff_id !== row.staff_id_1 || asg2.staff_id !== row.staff_id_2) {
-    throw new HttpError(400, "Nhân sự của ca trực đã thay đổi kể từ lúc gửi yêu cầu.");
-  }
-
-  if (asg1.unit_id !== row.unit_id_1 || asg1.date !== row.date_1 || asg1.slot !== row.slot_1 ||
-      asg2.unit_id !== row.unit_id_2 || asg2.date !== row.date_2 || asg2.slot !== row.slot_2) {
-    throw new HttpError(400, "Vị trí lịch trực đã thay đổi kể từ lúc gửi yêu cầu.");
-  }
-
-  const pendingGuard = "EXISTS (SELECT 1 FROM swap_requests WHERE id = ? AND status = 'pending' AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP))";
-  const swapResults = await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE schedule_assignments SET slot = ?, updated_at = CURRENT_TIMESTAMP, confirmed = 0 WHERE id = ? AND ${pendingGuard}`
-    ).bind(-100000 - asg2.id, asg2.id, row.id),
-    env.DB.prepare(
-      `UPDATE schedule_assignments SET unit_id = ?, date = ?, slot = ?, updated_at = CURRENT_TIMESTAMP, confirmed = 0 WHERE id = ? AND ${pendingGuard}`
-    ).bind(asg2.unit_id, asg2.date, asg2.slot, asg1.id, row.id),
-    env.DB.prepare(
-      `UPDATE schedule_assignments SET unit_id = ?, date = ?, slot = ?, updated_at = CURRENT_TIMESTAMP, confirmed = 0 WHERE id = ? AND ${pendingGuard}`
-    ).bind(asg1.unit_id, asg1.date, asg1.slot, asg2.id, row.id),
-    env.DB.prepare(
-      "UPDATE swap_requests SET status = 'approved', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending' AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)"
-    ).bind(row.id)
-  ]);
-  if ((swapResults.at(-1)?.meta.changes || 0) !== 1) {
-    throw new HttpError(409, "Yêu cầu đổi trực đã được xử lý bởi một phiên khác.");
-  }
-
-  await syncWorkScheduleAfterDutySwap(env, {
-    staffId1: asg1.staff_id,
-    dutyDate1: asg1.date,
-    staffId2: asg2.staff_id,
-    dutyDate2: asg2.date,
-    updatedBy: null
-  });
-
-  await env.DB.prepare("UPDATE swap_requests SET status = 'approved', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(row.id).run();
-
-  const [staff1, staff2] = await Promise.all([
-    getStaffById(env, row.staff_id_1),
-    getStaffById(env, row.staff_id_2)
-  ]);
-
-  const staffType1 = staff1.type ? `${staff1.type}. ` : "";
-  const staffType2 = staff2.type ? `${staff2.type}. ` : "";
-  await audit(
-    env,
-    user.id,
-    "accept_swap",
-    "swap_request",
-    row.id,
-    `Đồng ý đổi trực: ${staffType1}${staff1.name} (${formatDate(row.date_1)}) <-> ${staffType2}${staff2.name} (${formatDate(row.date_2)})`
-  );
-
-  return json({ ok: true });
-}
-
-async function rejectSwapPublic(env: Env, url: URL, user: User): Promise<Response> {
-  const token = url.searchParams.get("token") || "";
-  if (!token) throw new HttpError(400, "Thiếu token xác nhận.");
-
-  const row = await env.DB.prepare(
-    `SELECT sr.*, creator.staff_id AS creator_staff_id
-     FROM swap_requests sr
-     LEFT JOIN users creator ON creator.id = sr.created_by
-     WHERE sr.token = ? AND sr.status = 'pending'
-       AND (sr.expires_at IS NULL OR sr.expires_at > CURRENT_TIMESTAMP)`
-  ).bind(token).first<SwapRequestRow>();
-
-  if (!row) throw new HttpError(400, "Yêu cầu đổi trực đã được duyệt, từ chối hoặc không hợp lệ.");
-  requireSwapRecipient(row, user);
-
-  const rejected = await env.DB.prepare(
-    "UPDATE swap_requests SET status = 'rejected', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'"
-  ).bind(row.id).run();
-  if ((rejected.meta.changes || 0) !== 1) throw new HttpError(409, "Yêu cầu đổi trực đã được xử lý bởi một phiên khác.");
-
-  const [staff1, staff2] = await Promise.all([
-    getStaffById(env, row.staff_id_1),
-    getStaffById(env, row.staff_id_2)
-  ]);
-
-  const staffType1 = staff1.type ? `${staff1.type}. ` : "";
-  const staffType2 = staff2.type ? `${staff2.type}. ` : "";
-  await audit(
-    env,
-    user.id,
-    "reject_swap",
-    "swap_request",
-    row.id,
-    `Từ chối đổi trực: ${staffType1}${staff1.name} <-> ${staffType2}${staff2.name}`
-  );
-
-  return json({ ok: true });
-}
-
-// === DUTY REPORT ENDPOINTS ===
-
-async function getReportEndpoint(env: Env, url: URL, user: User): Promise<Response> {
-  const date = url.searchParams.get("date") || "";
-  if (!date) throw new HttpError(400, "Thiếu ngày trực.");
-
-  const row = await env.DB.prepare("SELECT * FROM duty_reports WHERE date = ?").bind(date).first();
-
-
-  const { results: scheduledStaff } = await env.DB.prepare(`
-    SELECT s.name, s.type
-    FROM schedule_assignments sa
-    JOIN staff s ON s.id = sa.staff_id
-    JOIN schedule_units su ON su.id = sa.unit_id
-    WHERE sa.date = ? AND su.type IN ('duty_bs', 'duty_ktv')
-    ORDER BY su.type, sa.slot
-  `).bind(date).all<{ name: string; type: string }>();
-
-  const scheduledBs = (scheduledStaff || [])
-    .filter((s) => s.type === "BS")
-    .map((s) => s.name.trim());
-
-  const scheduledKtv = (scheduledStaff || [])
-    .filter((s) => s.type === "KTV")
-    .map((s) => s.name.trim());
-
-  return json({
-    report: row ? mapReportRow(row) : null,
-    scheduledBs,
-    scheduledKtv
-  });
-}
-
-async function listReportsEndpoint(env: Env): Promise<Response> {
-  const { results } = await env.DB.prepare(
-    "SELECT date, report_date, report_time, bs_truc, ktv_truc FROM duty_reports ORDER BY date DESC LIMIT 100"
-  ).all();
-  return json({ reports: results });
-}
-
-async function saveReportEndpoint(request: Request, env: Env, user: User): Promise<Response> {
-  const body = await readJson<Partial<DutyReport>>(request);
-  const date = String(body.date || "").trim();
-  const reportDate = String(body.reportDate || "").trim();
-  const reportTime = String(body.reportTime || "").trim();
-  if (!isIsoDate(date) || !isIsoDate(reportDate) || !reportTime) {
-    throw new HttpError(400, "Ngày trực, ngày báo cáo hoặc giờ báo cáo không hợp lệ.");
-  }
-  const counts = [body.xqKhoa, body.xqGiuong, body.mri, body.ctScan].map((value) => Number(value ?? 0));
-  if (counts.some((value) => !Number.isInteger(value) || value < 0)) {
-    throw new HttpError(400, "Số lượng ca phải là số nguyên không âm.");
-  }
-
-  const existing = await env.DB.prepare(
-    "SELECT date FROM duty_reports WHERE date = ?"
-  ).bind(date).first<Record<string, unknown>>();
-
-  if (existing) {
-    const updated = await env.DB.prepare(`
-      UPDATE duty_reports SET
-        report_date = ?,
-        report_time = ?,
-        bs_truc = ?,
-        ktv_truc = ?,
-        xq_khoa = ?,
-        xq_giuong = ?,
-        mri = ?,
-        ct_scan = ?,
-        thuoc_su_dung = ?,
-        ca_kho = ?,
-        thiet_bi = ?,
-        an_ninh = ?,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE ${dutyReportUpdateWhere(user.role)}
-    `).bind(
-      reportDate,
-      reportTime,
-      body.bsTruc,
-      body.ktvTruc,
-      ...counts,
-      body.thuocSuDung || "",
-      body.caKho || "",
-      body.thietBi || "",
-      body.anNinh || "",
-      date
-    ).run();
-    if ((updated.meta.changes || 0) !== 1) {
-      throw new HttpError(409, "Báo cáo vừa thay đổi. Vui lòng tải lại và lưu lại.");
-    }
-    await audit(env, user.id, "update", "duty_report", null, `Cập nhật báo cáo trực ngày ${date}`);
-  } else {
-    await env.DB.prepare(`
-      INSERT INTO duty_reports (
-        date, report_date, report_time, bs_truc, ktv_truc,
-        xq_khoa, xq_giuong, mri, ct_scan, thuoc_su_dung, ca_kho, thiet_bi, an_ninh
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(
-      date,
-      reportDate,
-      reportTime,
-      body.bsTruc,
-      body.ktvTruc,
-      ...counts,
-      body.thuocSuDung || "",
-      body.caKho || "",
-      body.thietBi || "",
-      body.anNinh || ""
-    ).run();
-    await audit(env, user.id, "create", "duty_report", null, `Tạo báo cáo trực ngày ${date}`);
-  }
-
-  return json({ ok: true });
-}
-
-async function signReportEndpoint(request: Request, env: Env, user: User): Promise<Response> {
-  const body = await readJson<{ date?: string; role?: unknown; signature?: string; signerName?: string; useStoredSignature?: boolean }>(request);
-  const date = String(body.date || "").trim();
-  const role = body.role;
-
-  if (!isIsoDate(date) || !isReportRole(role)) {
-    throw new HttpError(400, "Ngày trực hoặc vai trò ký không hợp lệ.");
-  }
-
-  if (role === "bs" && user.role !== "bs" && user.role !== "admin") {
-    throw new HttpError(403, "Chỉ Bác sĩ trực hoặc Admin được ký vai trò này.");
-  }
-  if (role === "ktv" && user.role !== "ktv" && user.role !== "admin") {
-    throw new HttpError(403, "Chỉ Kỹ thuật viên trực hoặc Admin được ký vai trò này.");
-  }
-  if (role === "lanhdao" && user.role !== "admin") {
-    throw new HttpError(403, "Chỉ Lãnh đạo khoa hoặc Admin được ký vai trò này.");
-  }
-
-  if (role !== "lanhdao" && user.role !== "admin") {
-    if (!user.staffId) throw new HttpError(403, "Tài khoản chưa liên kết nhân sự.");
-    const dutyType = role === "bs" ? "duty_bs" : "duty_ktv";
-    const scheduled = await env.DB.prepare(
-      `SELECT 1
-       FROM schedule_assignments a
-       JOIN schedule_units u ON u.id = a.unit_id
-       WHERE a.date = ? AND a.staff_id = ? AND u.type = ?
-       LIMIT 1`
-    ).bind(date, user.staffId, dutyType).first();
-    if (!scheduled) throw new HttpError(403, "Chỉ nhân sự được phân công trực ngày này mới được ký.");
-  }
-
-  const reportExists = await env.DB.prepare("SELECT date FROM duty_reports WHERE date = ?").bind(date).first();
-  if (!reportExists) throw new HttpError(409, "Hãy lưu báo cáo trước khi ký.");
-
-  const signature = body.useStoredSignature ? user.signature : body.signature;
-  if (!signature || !isSignatureDataUrl(signature)) {
-    throw new HttpError(400, body.useStoredSignature ? "Tài khoản chưa có chữ ký mẫu hợp lệ." : "Chữ ký không hợp lệ.");
-  }
-  const name = resolveReportSignerName(body.signerName, user.staffFullName || user.staffName);
-  if (!name) throw new HttpError(400, "Hãy nhập họ và tên người ký.");
-  if (name.length > 120) throw new HttpError(400, "Họ và tên người ký không được quá 120 ký tự.");
-  const nowStr = new Date().toISOString();
-
-  const signatureCol = role === "bs" ? "signature_bs" : (role === "ktv" ? "signature_ktv" : "signature_lanhdao");
-  const userIdCol = role === "bs" ? "signature_bs_user_id" : (role === "ktv" ? "signature_ktv_user_id" : "signature_lanhdao_user_id");
-  const nameCol = role === "bs" ? "signature_bs_name" : (role === "ktv" ? "signature_ktv_name" : "signature_lanhdao_name");
-  const atCol = role === "bs" ? "signature_bs_at" : (role === "ktv" ? "signature_ktv_at" : "signature_lanhdao_at");
-
-  const signed = await env.DB.prepare(`
-    UPDATE duty_reports SET
-      ${signatureCol} = ?,
-      ${userIdCol} = ?,
-      ${nameCol} = ?,
-      ${atCol} = ?,
-      updated_at = CURRENT_TIMESTAMP
-    WHERE date = ? AND ${signatureCol} IS NULL AND ${userIdCol} IS NULL
-  `).bind(signature, user.id, name, nowStr, date).run();
-  if ((signed.meta.changes || 0) !== 1) throw new HttpError(409, "Vai trò này đã được ký trước đó.");
-
-
-  await audit(env, user.id, "sign", "duty_report", null, `Ký tên vai trò ${role === "bs" ? "BS" : (role === "ktv" ? "KTV" : "Lãnh đạo")} ngày ${date}: ${name}`);
-
-  return json({ ok: true });
-}
-
-async function deleteReportEndpoint(env: Env, url: URL, user: User): Promise<Response> {
-  requireAdmin(user);
-  const date = url.searchParams.get("date") || "";
-  if (!date) throw new HttpError(400, "Thiếu ngày trực.");
-
-  const result = await env.DB.prepare("DELETE FROM duty_reports WHERE date = ?").bind(date).run();
-  if (result.meta.changes === 0) {
-    throw new HttpError(404, "Không tìm thấy báo cáo trực cho ngày này.");
-  }
-
-  await audit(env, user.id, "delete", "duty_report", null, `Xóa báo cáo trực ngày ${date}`);
-  return json({ ok: true });
-}
-
-function mapReportRow(row: Record<string, any>) {
+function mapReportRow(row: Record<string, any>, session: DaySession, attendance: AttendanceEntry[]): WorkReport {
   return {
     date: row.date,
+    session,
     reportDate: row.report_date,
     reportTime: row.report_time,
-    bsTruc: row.bs_truc,
-    ktvTruc: row.ktv_truc,
-    xqKhoa: row.xq_khoa,
-    xqGiuong: row.xq_giuong,
-    mri: row.mri,
-    ctScan: row.ct_scan,
-    thuocSuDung: row.thuoc_su_dung,
-    caKho: row.ca_kho,
-    thietBi: row.thiet_bi,
-    anNinh: row.an_ninh,
-    signatureBs: row.signature_bs,
-    signatureBsName: row.signature_bs_name,
-    signatureBsAt: row.signature_bs_at,
-    signatureKtv: row.signature_ktv,
-    signatureKtvName: row.signature_ktv_name,
-    signatureKtvAt: row.signature_ktv_at,
-    signatureLanhdao: row.signature_lanhdao,
-    signatureLanhdaoName: row.signature_lanhdao_name,
-    signatureLanhdaoAt: row.signature_lanhdao_at,
+    soLuotKham: row.so_luot_kham,
+    soHoSo: row.so_ho_so,
+    vatTu: row.vat_tu,
+    suCo: row.su_co,
+    deXuat: row.de_xuat,
+    signatureDieuPhoi: row.signature_dieu_phoi,
+    signatureDieuPhoiName: row.signature_dieu_phoi_name,
+    signatureDieuPhoiAt: row.signature_dieu_phoi_at,
+    attendance,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };

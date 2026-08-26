@@ -1,58 +1,70 @@
-export type Role = "admin" | "bs" | "ktv" | "tkyk";
-export type StaffType = "BS" | "KTV" | "TKYK";
-export type UnitKind = "duty_common" | "duty_bs" | "duty_ktv" | "leave" | "work_bs" | "work_ktv";
-export type RotationMode = "daily" | "weekly";
+export type Role = "admin" | "dieu_phoi" | "khoa_phong";
+export type DaySession = "morning" | "afternoon" | "full";
+export type SignerRole = "khoa_phong" | "dieu_phoi";
 
 export interface User {
   id: number;
   username: string;
   role: Role;
-  staffId: number | null;
-  staffName?: string | null;
-  staffFullName?: string | null;
+  departmentId: number | null;
+  departmentName?: string | null;
+  fullName?: string | null;
   signature?: string | null;
   hasSignature?: boolean;
 }
 
-export interface Staff {
+export interface Department {
   id: number;
-  familyMiddleName: string;
   name: string;
-  type: StaffType;
   active: boolean;
+  sortOrder: number;
 }
 
-export interface ScheduleUnit {
-  id: number;
-  code: string;
-  section: "I" | "II" | "III";
-  label: string;
-  type: UnitKind;
-  maxPerDay: number | null;
-  sortOrder: number;
-  computed: boolean;
+export interface WorkDay {
+  date: string;
+  session: DaySession;
+  note: string | null;
 }
 
 export interface Assignment {
   id: number;
-  unitId: number;
-  unitCode: string;
   date: string;
-  staffId: number;
-  staffName: string;
-  staffType: StaffType;
-  slot: number;
+  departmentId: number;
+  departmentName: string;
+  personName: string;
+  personPhone: string;
+  updatedAt?: string | null;
 }
 
-export interface LeaveDay {
+/** Ô của hàng điều phối: điều phối nào phụ trách ngày làm nào. */
+export interface CoordinatorAssignment {
   id: number;
-  requestId: number;
   date: string;
-  staffId: number;
-  staffName: string;
-  staffType: StaffType;
-  reason: string | null;
-  registeredAt?: string | null;
+  userId: number;
+  username: string;
+  fullName: string;
+}
+
+export interface SwapRequest {
+  id: number;
+  token: string;
+  status: "pending" | "approved" | "rejected" | "cancelled";
+  assignmentId1: number;
+  userId1: number;
+  name1: string;
+  date1: string;
+  assignmentId2: number;
+  userId2: number;
+  name2: string;
+  date2: string;
+  createdAt: string;
+  expiresAt: string | null;
+}
+
+export interface SwapResponse {
+  ok?: boolean;
+  pending?: boolean;
+  token?: string;
 }
 
 export interface AuditLog {
@@ -66,38 +78,28 @@ export interface AuditLog {
 }
 
 export interface RotationMember {
-  staffId: number;
-  staffName: string;
-  staffType: StaffType;
+  departmentId: number;
+  departmentName: string;
   turnIndex: number;
   memberOrder: number;
 }
 
-export interface UnitRotation {
-  unitId: number;
+export interface Rotation {
   startDate: string;
-  mode: RotationMode;
   enabled: boolean;
   turns: RotationMember[][];
 }
 
 export interface ScheduleResponse {
-  weekStart: string;
-  days: string[];
-  units: ScheduleUnit[];
-  staff: Staff[];
+  month: string;
+  workDays: WorkDay[];
+  departments: Department[];
   assignments: Assignment[];
-  leaveDays: LeaveDay[];
-  nextWeekLeaveDays?: LeaveDay[];
-  monthLeaveDays?: LeaveDay[];
+  coordinators: User[];
+  coordinatorAssignments: CoordinatorAssignment[];
+  rotation: Rotation | null;
   auditLogs: AuditLog[];
-  rotations: UnitRotation[];
-  pendingLeaves?: PendingLeave[];
-  approveLeaveBs?: boolean;
-  approveLeaveKtv?: boolean;
-  approveSwap?: boolean;
-  showStaffRail?: boolean;
-  showLeaveMonthCalendar?: boolean;
+  lockPersonOnWorkDay?: boolean;
 }
 
 export interface LoginResponse {
@@ -109,88 +111,50 @@ export interface ApiError {
 }
 
 export interface SystemSettings {
-  approve_leave_bs: boolean;
-  approve_leave_ktv: boolean;
-  approve_swap: boolean;
-  show_staff_rail: boolean;
-  show_leave_month_calendar: boolean;
+  lock_person_on_workday: boolean;
 }
 
-export interface SettingsResponse extends SystemSettings {
-  blocked_dates: string[];
+export interface SettingsResponse extends SystemSettings {}
+
+export interface AttendanceEntry {
+  departmentId: number;
+  departmentName: string;
+  personName: string;
+  personPhone: string;
+  present: boolean;
+  note: string | null;
+  signature: string | null;
+  signatureName: string | null;
+  signatureAt: string | null;
 }
 
-export interface PendingLeave {
-  id: number; // request_id
-  staffId: number;
-  staffName: string;
-  staffType: StaffType;
-  reason: string | null;
-  dates: string[];
-}
-
-export interface SwapRequest {
-  id: number;
-  token: string;
-  assignmentId1: number;
-  staffId1: number;
-  staffName1: string;
-  unitLabel1: string;
-  date1: string;
-  slot1: number;
-  assignmentId2: number;
-  staffId2: number;
-  staffName2: string;
-  unitLabel2: string;
-  date2: string;
-  slot2: number;
-  status: "pending" | "approved" | "rejected";
-  createdAt: string;
-}
-
-export interface MoveAssignmentResponse {
-  ok?: boolean;
-  pending?: boolean;
-  token?: string;
-  message?: string;
-}
-
-export interface DutyReport {
+export interface WorkReport {
   date: string;
+  session: DaySession;
   reportDate: string;
   reportTime: string;
-  bsTruc: string;
-  ktvTruc: string;
-  xqKhoa: number;
-  xqGiuong: number;
-  mri: number;
-  ctScan: number;
-  thuocSuDung: string;
-  caKho: string;
-  thietBi: string;
-  anNinh: string;
-  signatureBs: string | null;
-  signatureBsName: string | null;
-  signatureBsAt: string | null;
-  signatureKtv: string | null;
-  signatureKtvName: string | null;
-  signatureKtvAt: string | null;
-  signatureLanhdao: string | null;
-  signatureLanhdaoName: string | null;
-  signatureLanhdaoAt: string | null;
+  soLuotKham: number;
+  soHoSo: number;
+  vatTu: string;
+  suCo: string;
+  deXuat: string;
+  signatureDieuPhoi: string | null;
+  signatureDieuPhoiName: string | null;
+  signatureDieuPhoiAt: string | null;
+  attendance: AttendanceEntry[];
   createdAt?: string;
   updatedAt?: string;
 }
 
-export interface DutyReportSummary {
+export interface WorkReportSummary {
   date: string;
-  report_date: string;
+  session: DaySession;
   report_time: string;
-  bs_truc: string | null;
-  ktv_truc: string | null;
+  present_count: number;
+  total_count: number;
 }
 
-export type NotificationType = "swap" | "leave" | "report";
+export type NotificationType = "assignment" | "person" | "report" | "swap";
 
 export interface NotificationItem {
   id: string;
@@ -199,7 +163,7 @@ export interface NotificationItem {
   message: string;
   createdAt: string;
   read: boolean;
-  actionView?: "schedule" | "leave" | "report";
+  actionView?: "schedule" | "report";
   actionDate?: string;
   swapToken?: string;
 }

@@ -1,15 +1,32 @@
-# Lịch trực
+# Lịch khám sức khỏe toàn dân
 
-Ứng dụng quản lý lịch trực, nhân sự, đổi lịch, nghỉ phép và báo cáo trực.
+Ứng dụng quản lý lịch khám sức khỏe toàn dân: mở ngày làm việc theo buổi, phân công khoa phòng theo tua, khoa phòng tự điền người đi làm kèm số điện thoại, và báo cáo làm việc có điểm danh, ký tên.
 
-Repository: <https://github.com/thuanhuynhh/lich-truc>
+Repository: <https://github.com/thuanhuynhh/lich-truc> (branch `lich-ksktd`)
+
+## Mô hình nghiệp vụ
+
+- **Ngày làm việc**: lịch không chạy liên tục T2–CN. Quản lý hoặc điều phối mở từng ngày khám và chọn buổi làm: **Sáng**, **Chiều** hoặc **Cả buổi**. Chỉ những ngày đã mở mới thành cột trong bảng lịch.
+- **Bảng lịch**: hàng đầu là **hàng điều phối** (ai phụ trách buổi khám hôm đó), các hàng tiếp theo là **khoa phòng**. Mỗi ô khoa phòng chứa họ tên và số điện thoại người đi làm.
+- **Tua khám**: quản lý/điều phối cấu hình các tua khoa phòng; tua xoay theo thứ tự **ngày làm việc**, không theo ngày dương lịch. Áp tua cho cả tháng vẫn giữ lại họ tên và số điện thoại khoa phòng đã điền.
+- **Đổi ngày làm của điều phối**: điều phối xin đổi ngày làm với một điều phối khác; yêu cầu chỉ có hiệu lực khi người kia đồng ý (qua thông báo trong app hoặc link xác nhận). Quản lý xếp lịch trực tiếp, không cần duyệt.
+- **Báo cáo làm việc**: mỗi ngày làm có một báo cáo. Điều phối phụ trách nhập số liệu buổi khám; từng khoa phòng điểm danh và ký tên; điều phối ký chốt. Sau khi ký chốt chỉ quản lý còn sửa được số liệu.
+
+## Ba vai trò
+
+| Vai trò | Quyền |
+| --- | --- |
+| `admin` (Quản lý) | Toàn quyền: khoa phòng, tài khoản, cấu hình, ngày làm, phân công, hàng điều phối, tua, báo cáo |
+| `dieu_phoi` (Điều phối) | Mở/sửa ngày làm, phân công khoa phòng, chạy tua, nhập và ký chốt báo cáo ngày mình phụ trách, xin đổi ngày làm. Không quản lý tài khoản, khoa phòng hay cấu hình |
+| `khoa_phong` (Khoa phòng) | Xem lịch; điền và sửa họ tên + số điện thoại người đi làm của khoa phòng mình; điểm danh và ký tên trong báo cáo làm việc |
+
+Khoa phòng sửa được người đi làm khi ngày làm **chưa qua**. Cấu hình `lock_person_on_workday` cho phép siết lại: phải điền xong **trước** ngày khám.
 
 ## Công nghệ
 
 - React + Vite + TypeScript
 - Cloudflare Workers phục vụ API và static assets
-- Cloudflare Hyperdrive kết nối PostgreSQL trong cấu hình hiện tại
-- SQL migrations trong `migrations/`
+- Cloudflare Hyperdrive kết nối PostgreSQL
 - Vitest cho unit tests
 
 ## Yêu cầu
@@ -24,10 +41,9 @@ Repository: <https://github.com/thuanhuynhh/lich-truc>
 ```bash
 git clone https://github.com/thuanhuynhh/lich-truc.git
 cd lich-truc
+git checkout lich-ksktd
 npm install
 ```
-
-`node_modules/` không được commit. Chỉ cần chạy `npm install` để tải lại module từ `package-lock.json`.
 
 ## Chạy và kiểm thử local
 
@@ -38,7 +54,29 @@ npm run dev         # Frontend: http://127.0.0.1:5173
 npm run worker:dev  # Worker: http://localhost:8787
 ```
 
-Secret local đặt trong `.dev.vars`; không commit file này.
+Chạy cả `npm run dev` và `npm run worker:dev` mới có API. Secret local đặt trong `.dev.vars`, không commit file này.
+
+## Database
+
+Schema nằm ở [`postgres/schema.sql`](./postgres/schema.sql), dùng schema PostgreSQL `lich_ksktd`. Đây là **schema mới hoàn toàn**, không nâng cấp từ dữ liệu lịch trực cũ vì nghiệp vụ đã khác (nhân sự → khoa phòng, lịch tuần → ngày làm việc).
+
+Khởi tạo:
+
+```bash
+psql "$DATABASE_URL" -f postgres/schema.sql
+DATABASE_URL="$DATABASE_URL" npm run db:create-admin -- admin 'MatKhauManh' 'Nguyễn Văn A'
+```
+
+Sau đó đăng nhập bằng tài khoản quản lý vừa tạo để thêm khoa phòng, tài khoản điều phối và tài khoản khoa phòng.
+
+Tạo Hyperdrive trỏ tới database này, không ghi password vào Git:
+
+```bash
+npx wrangler hyperdrive create lich-ksktd-db \
+  --connection-string "$HYPERDRIVE_CONNECTION_STRING"
+```
+
+Cập nhật `hyperdrive[0].id` trong `wrangler.jsonc` rồi chạy `npm run worker:types`.
 
 ## Deploy Cloudflare Worker
 
@@ -51,83 +89,14 @@ npm run deploy:dry
 npm run deploy
 ```
 
-Cấu hình Worker nằm ở [`wrangler.jsonc`](./wrangler.jsonc). Cấu hình hiện tại đã bật SPA assets, `nodejs_compat`, observability và binding Hyperdrive.
-
-## Database hiện tại: Hyperdrive + PostgreSQL
-
-Worker hiện tại đọc `env.HYPERDRIVE.connectionString` và dùng adapter PostgreSQL trong `src/worker/database.ts`. Vì vậy production cần PostgreSQL và một Cloudflare Hyperdrive config trỏ đến database đó.
-
-Schema PostgreSQL nằm ở [`postgres/schema.sql`](./postgres/schema.sql). Tạo Hyperdrive bằng Wrangler, không ghi password vào Git:
-
-```bash
-npx wrangler hyperdrive create lich-truc-db \
-  --connection-string "$HYPERDRIVE_CONNECTION_STRING"
-```
-
-Sau đó cập nhật `hyperdrive[0].id` trong `wrangler.jsonc` và chạy `npm run worker:types`.
-
-## Dùng Cloudflare D1
-
-> Lưu ý: migration trong `migrations/` có định dạng SQLite/D1, nhưng Worker hiện tại đang chạy PostgreSQL qua Hyperdrive. Chỉ thêm D1 binding chưa đủ để chuyển production sang D1; cần thay adapter trong `src/worker/index.ts` và `src/worker/database.ts` sang `D1Database`.
-
-Chuẩn bị database và migration D1:
-
-```bash
-npx wrangler d1 create lich-truc-cdha
-npx wrangler d1 migrations apply lich-truc-cdha --local
-npx wrangler d1 migrations list lich-truc-cdha --remote
-# Chỉ chạy dòng dưới sau khi Worker đã chuyển sang D1:
-npx wrangler d1 migrations apply lich-truc-cdha --remote
-```
-
-Binding D1 mẫu trong `wrangler.jsonc`:
-
-```jsonc
-{
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "lich-truc-cdha",
-      "database_id": "<DATABASE_ID>",
-      "migrations_dir": "./migrations"
-    }
-  ]
-}
-```
-
-Sau mỗi thay đổi binding, chạy:
-
-```bash
-npm run worker:types
-```
-
-## Skill AI cho Cloudflare
-
-AI skills không phải dependency runtime. Chúng giúp Codex, Claude Code hoặc coding agent hiểu đúng Workers, D1 và Wrangler. Danh sách skill của project nằm ở [`skills-lock.json`](./skills-lock.json).
-
-Cài các skill Cloudflare:
-
-```bash
-npx skills add https://github.com/cloudflare/skills \
-  --skill cloudflare \
-  --skill wrangler \
-  --skill workers-best-practices \
-  --skill agents-sdk
-```
-
-- `cloudflare`: chọn đúng sản phẩm Cloudflare như Workers, D1 và Hyperdrive.
-- `wrangler`: lệnh CLI, binding, migration và deploy.
-- `workers-best-practices`: kiểm tra secret, binding và cấu hình production.
-- `agents-sdk`: dùng khi bổ sung AI agent stateful hoặc workflow vào Worker.
-
 ## Cấu trúc chính
 
 ```text
-src/app/          Frontend React
-src/worker/       Worker API và database adapter
-src/shared/       TypeScript types và business rules
-migrations/       Migration SQLite/D1
+src/app/          Frontend React (lịch, ngày làm, báo cáo, quản trị)
+src/worker/       Worker API và adapter PostgreSQL
+src/shared/       TypeScript types và business rules dùng chung
 postgres/         Schema PostgreSQL
+scripts/          Script tạo tài khoản quản lý đầu tiên
 tests/            Unit tests
 wrangler.jsonc    Cấu hình Cloudflare Worker
 ```
@@ -143,6 +112,4 @@ wrangler.jsonc    Cấu hình Cloudflare Worker
 
 - [Cloudflare Workers](https://developers.cloudflare.com/workers/)
 - [Wrangler](https://developers.cloudflare.com/workers/wrangler/)
-- [Cloudflare D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/)
 - [Cloudflare Hyperdrive](https://developers.cloudflare.com/hyperdrive/)
-- [Cloudflare AI skills](https://github.com/cloudflare/skills)

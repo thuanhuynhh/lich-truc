@@ -1,206 +1,268 @@
 import { describe, expect, it } from "vitest";
-import { getAuditActionValues } from "../src/shared/audit";
-import { canEditDutyReport, formatStaffFullName, getLeaveDateBlockReason, hasReportSignature, isReportRole, resolveReportSignerName, validateAssignmentInput, validateLeaveInput } from "../src/shared/validation";
-import type { Assignment, LeaveDay, ScheduleUnit, Staff, StaffType } from "../src/shared/types";
+import {
+  attendanceSummary,
+  canEditAssignmentPerson,
+  canEditWorkReport,
+  canManageSchedule,
+  hasCoordinatorSignature,
+  isRole,
+  isSignerRole,
+  normalizePhone,
+  resolveSignerName,
+  roleLabel,
+  validateAssignmentInput,
+  validateCoordinatorSwap,
+  validatePersonInput
+} from "../src/shared/validation";
+import type { Assignment, Department } from "../src/shared/types";
 
-const dutyBs: ScheduleUnit = {
-  id: 1,
-  code: "duty_bs",
-  section: "I",
-  label: "Lịch trực bác sĩ",
-  type: "duty_bs",
-  maxPerDay: 1,
-  sortOrder: 20,
-  computed: false
-};
+const department: Department = { id: 1, name: "Khoa Nội", active: true, sortOrder: 10 };
 
-describe("audit action filters", () => {
-  it("groups all duty-swap audit actions", () => {
-    expect(getAuditActionValues("swap")).toEqual(["move", "accept_swap", "reject_swap"]);
-    expect(getAuditActionValues("delete")).toEqual(["delete"]);
+function assignment(overrides: Partial<Assignment> = {}): Assignment {
+  return {
+    id: 1,
+    date: "2026-09-05",
+    departmentId: 1,
+    departmentName: "Khoa Nội",
+    personName: "Nguyễn Văn A",
+    personPhone: "0901234567",
+    ...overrides
+  };
+}
+
+describe("vai trò", () => {
+  it("chỉ nhận ba vai trò của hệ thống", () => {
+    expect(isRole("admin")).toBe(true);
+    expect(isRole("dieu_phoi")).toBe(true);
+    expect(isRole("khoa_phong")).toBe(true);
+    expect(isRole("bs")).toBe(false);
+  });
+
+  it("admin và điều phối được lên lịch, khoa phòng thì không", () => {
+    expect(canManageSchedule("admin")).toBe(true);
+    expect(canManageSchedule("dieu_phoi")).toBe(true);
+    expect(canManageSchedule("khoa_phong")).toBe(false);
+  });
+
+  it("hiển thị tên vai trò bằng tiếng Việt", () => {
+    expect(roleLabel("admin")).toBe("Quản lý");
+    expect(roleLabel("dieu_phoi")).toBe("Điều phối");
+    expect(roleLabel("khoa_phong")).toBe("Khoa phòng");
+  });
+
+  it("chỉ nhận vai trò ký hợp lệ", () => {
+    expect(isSignerRole("khoa_phong")).toBe(true);
+    expect(isSignerRole("dieu_phoi")).toBe(true);
+    expect(isSignerRole("admin")).toBe(false);
   });
 });
 
-const dutyKtv: ScheduleUnit = {
-  id: 2,
-  code: "duty_ktv",
-  section: "I",
-  label: "Lịch trực kỹ thuật viên",
-  type: "duty_ktv",
-  maxPerDay: 2,
-  sortOrder: 30,
-  computed: false
-};
+describe("người làm việc", () => {
+  it("bắt buộc có họ tên và số điện thoại", () => {
+    expect(validatePersonInput({ personName: "", personPhone: "0901234567" }))
+      .toBe("Hãy nhập họ và tên người làm việc.");
+    expect(validatePersonInput({ personName: "Nguyễn Văn A", personPhone: "" }))
+      .toBe("Hãy nhập số điện thoại liên hệ.");
+  });
 
-const workKtv: ScheduleUnit = {
-  id: 3,
-  code: "work_ktv",
-  section: "III",
-  label: "Lịch làm việc KTV",
-  type: "work_ktv",
-  maxPerDay: null,
-  sortOrder: 210,
-  computed: false
-};
+  it("chặn số điện thoại không hợp lệ", () => {
+    expect(validatePersonInput({ personName: "Nguyễn Văn A", personPhone: "abc" })).not.toBeNull();
+    expect(validatePersonInput({ personName: "Nguyễn Văn A", personPhone: "090" })).not.toBeNull();
+  });
 
-const bs: Staff = { id: 10, familyMiddleName: "", name: "BS A", type: "BS", active: true };
-const ktv: Staff = { id: 20, familyMiddleName: "", name: "KTV A", type: "KTV", active: true };
-const tkyk: Staff = { id: 30, familyMiddleName: "", name: "TKYK A", type: "TKYK", active: true };
+  it("chấp nhận số điện thoại có dấu cách hoặc đầu số quốc tế", () => {
+    expect(validatePersonInput({ personName: "Nguyễn Văn A", personPhone: "0901 234 567" })).toBeNull();
+    expect(validatePersonInput({ personName: "Nguyễn Văn A", personPhone: "+84901234567" })).toBeNull();
+  });
 
-function assignment(id: number, unitId: number, staffId: number, staffType: "BS" | "KTV"): Assignment {
-  return {
-    id,
-    unitId,
-    unitCode: unitId === 1 ? "duty_bs" : "duty_ktv",
-    date: "2026-06-24",
-    staffId,
-    staffName: `Name ${staffId}`,
-    staffType,
-    slot: id
+  it("chặn họ tên quá dài", () => {
+    expect(validatePersonInput({ personName: "a".repeat(121), personPhone: "0901234567" }))
+      .toBe("Họ và tên không được quá 120 ký tự.");
+  });
+
+  it("gom nhiều dấu cách trong số điện thoại", () => {
+    expect(normalizePhone("  0901   234 567 ")).toBe("0901 234 567");
+    expect(normalizePhone(undefined)).toBe("");
+  });
+});
+
+describe("phân công khoa phòng", () => {
+  it("chỉ phân công vào ngày đã mở làm việc", () => {
+    expect(
+      validateAssignmentInput({
+        department,
+        date: "2026-09-06",
+        workDayDates: ["2026-09-05"],
+        assignments: []
+      })
+    ).toBe("Ngày này chưa được mở làm việc. Hãy thêm ngày làm trước.");
+  });
+
+  it("không phân công khoa phòng đã tắt", () => {
+    expect(
+      validateAssignmentInput({
+        department: { ...department, active: false },
+        date: "2026-09-05",
+        workDayDates: ["2026-09-05"],
+        assignments: []
+      })
+    ).toBe("Khoa phòng này đã ngừng hoạt động.");
+  });
+
+  it("chặn trùng khoa phòng trong cùng một ngày", () => {
+    expect(
+      validateAssignmentInput({
+        department,
+        date: "2026-09-05",
+        workDayDates: ["2026-09-05"],
+        assignments: [assignment()]
+      })
+    ).toBe("Khoa Nội đã có trong ngày 2026-09-05.");
+  });
+
+  it("bỏ qua chính phân công đang được chuyển", () => {
+    expect(
+      validateAssignmentInput({
+        department,
+        date: "2026-09-05",
+        workDayDates: ["2026-09-05"],
+        assignments: [assignment()],
+        replacingAssignmentId: 1
+      })
+    ).toBeNull();
+  });
+});
+
+describe("quyền điền người làm việc", () => {
+  it("admin và điều phối sửa được mọi ô, kể cả ngày đã qua", () => {
+    expect(
+      canEditAssignmentPerson({
+        role: "admin",
+        userDepartmentId: null,
+        assignment: assignment({ date: "2020-01-01" }),
+        today: "2026-09-05"
+      })
+    ).toBe(true);
+    expect(
+      canEditAssignmentPerson({
+        role: "dieu_phoi",
+        userDepartmentId: null,
+        assignment: assignment({ date: "2020-01-01" }),
+        today: "2026-09-05"
+      })
+    ).toBe(true);
+  });
+
+  it("khoa phòng chỉ sửa ô của mình", () => {
+    expect(
+      canEditAssignmentPerson({
+        role: "khoa_phong",
+        userDepartmentId: 2,
+        assignment: assignment(),
+        today: "2026-09-05"
+      })
+    ).toBe(false);
+    expect(
+      canEditAssignmentPerson({
+        role: "khoa_phong",
+        userDepartmentId: 1,
+        assignment: assignment(),
+        today: "2026-09-05"
+      })
+    ).toBe(true);
+  });
+
+  it("khoa phòng không sửa được ngày đã qua", () => {
+    expect(
+      canEditAssignmentPerson({
+        role: "khoa_phong",
+        userDepartmentId: 1,
+        assignment: assignment({ date: "2026-09-04" }),
+        today: "2026-09-05"
+      })
+    ).toBe(false);
+  });
+
+  it("bật khóa thì khoa phòng phải điền trước ngày làm", () => {
+    expect(
+      canEditAssignmentPerson({
+        role: "khoa_phong",
+        userDepartmentId: 1,
+        assignment: assignment(),
+        today: "2026-09-05",
+        lockOnWorkDay: true
+      })
+    ).toBe(false);
+  });
+});
+
+describe("đổi ngày làm của điều phối", () => {
+  const base = {
+    source: { id: 1, userId: 10, date: "2026-09-12" },
+    target: { id: 2, userId: 11, date: "2026-09-19" },
+    requesterUserId: 10,
+    today: "2026-09-05"
   };
-}
 
-function leave(id: number, staffId: number, staffType: StaffType, date = "2026-06-24"): LeaveDay {
-  return {
-    id,
-    requestId: id,
-    date,
-    staffId,
-    staffName: `Name ${staffId}`,
-    staffType,
-    reason: null
+  it("cho phép đổi giữa hai điều phối khác nhau ở ngày chưa qua", () => {
+    expect(validateCoordinatorSwap(base)).toBeNull();
+  });
+
+  it("chỉ được xin đổi ngày làm của chính mình", () => {
+    expect(validateCoordinatorSwap({ ...base, requesterUserId: 11 }))
+      .toBe("Chỉ được xin đổi ngày làm của chính mình.");
+  });
+
+  it("không đổi với chính mình", () => {
+    expect(
+      validateCoordinatorSwap({ ...base, target: { id: 2, userId: 10, date: "2026-09-19" } })
+    ).toBe("Hãy chọn ngày làm của một điều phối khác.");
+  });
+
+  it("không đổi cùng một ô", () => {
+    expect(validateCoordinatorSwap({ ...base, target: { ...base.source } }))
+      .toBe("Không thể đổi với chính ngày làm đó.");
+  });
+
+  it("không đổi ngày đã qua", () => {
+    expect(
+      validateCoordinatorSwap({ ...base, source: { id: 1, userId: 10, date: "2026-09-01" } })
+    ).toBe("Chỉ đổi được ngày làm chưa qua.");
+    expect(
+      validateCoordinatorSwap({ ...base, target: { id: 2, userId: 11, date: "2026-09-01" } })
+    ).toBe("Chỉ đổi được ngày làm chưa qua.");
+  });
+});
+
+describe("báo cáo làm việc", () => {
+  const signed = {
+    signatureDieuPhoi: "data:image/png;base64,AAAA",
+    signatureDieuPhoiName: "Trần B",
+    signatureDieuPhoiAt: "2026-09-05T10:00:00Z"
   };
-}
 
-describe("schedule validation", () => {
-  it("rejects unknown report signer roles at runtime", () => {
-    expect(isReportRole("lanhdao")).toBe(true);
-    expect(isReportRole("leadership")).toBe(false);
-    expect(isReportRole({ role: "lanhdao" })).toBe(false);
+  it("nhận biết báo cáo đã được ký chốt", () => {
+    expect(hasCoordinatorSignature(null)).toBe(false);
+    expect(hasCoordinatorSignature({ signatureDieuPhoi: null, signatureDieuPhoiName: null, signatureDieuPhoiAt: null }))
+      .toBe(false);
+    expect(hasCoordinatorSignature(signed)).toBe(true);
   });
 
-  it("uses the submitted signer name instead of the account username", () => {
-    expect(resolveReportSignerName("  Nguyễn Văn A  ", "Tên nhân sự")).toBe("Nguyễn Văn A");
-    expect(resolveReportSignerName("", "  Trần Thị B  ")).toBe("Trần Thị B");
-    expect(resolveReportSignerName(undefined, null)).toBe("");
+  it("sau khi ký chốt thì chỉ admin còn sửa được số liệu", () => {
+    expect(canEditWorkReport("admin", signed)).toBe(true);
+    expect(canEditWorkReport("dieu_phoi", signed)).toBe(false);
+    expect(canEditWorkReport("dieu_phoi", null)).toBe(true);
+    expect(canEditWorkReport("khoa_phong", null)).toBe(false);
   });
 
-  it("joins the family/middle name and given name for duty reports", () => {
-    expect(formatStaffFullName("  Nguyễn Văn ", " An ")).toBe("Nguyễn Văn An");
-    expect(formatStaffFullName("", "An")).toBe("An");
+  it("lấy tên người ký từ dữ liệu gửi lên hoặc tên tài khoản", () => {
+    expect(resolveSignerName("  Nguyễn Văn A  ", "Trần B")).toBe("Nguyễn Văn A");
+    expect(resolveSignerName("", "Trần B")).toBe("Trần B");
+    expect(resolveSignerName(undefined, null)).toBe("");
   });
 
-  it("locks report content as soon as any signature evidence exists", () => {
-    const unsigned = {
-      signatureBs: null,
-      signatureBsName: null,
-      signatureBsAt: null,
-      signatureKtv: null,
-      signatureKtvName: null,
-      signatureKtvAt: null,
-      signatureLanhdao: null,
-      signatureLanhdaoName: null,
-      signatureLanhdaoAt: null
-    };
-
-    expect(hasReportSignature(unsigned)).toBe(false);
-    expect(hasReportSignature({ ...unsigned, signatureBs: "data:image/png;base64,abc" })).toBe(true);
-    expect(hasReportSignature({ ...unsigned, signatureKtvName: "KTV A" })).toBe(true);
-    expect(hasReportSignature({ ...unsigned, signatureLanhdaoAt: "2026-07-18T00:00:00Z" })).toBe(true);
-  });
-
-  it("allows every authenticated role to edit signed reports repeatedly", () => {
-    const signed = {
-      signatureBs: "data:image/png;base64,abc",
-      signatureBsName: "BS A",
-      signatureBsAt: "2026-07-18T00:00:00Z",
-      signatureKtv: null,
-      signatureKtvName: null,
-      signatureKtvAt: null,
-      signatureLanhdao: null,
-      signatureLanhdaoName: null,
-      signatureLanhdaoAt: null
-    };
-
-    expect(canEditDutyReport("admin", signed)).toBe(true);
-    expect(canEditDutyReport("bs", signed)).toBe(true);
-    expect(canEditDutyReport("ktv", signed)).toBe(true);
-  });
-
-  it("limits doctor duty to one person per day", () => {
-    const error = validateAssignmentInput({
-      unit: dutyBs,
-      staff: { ...bs, id: 11 },
-      date: "2026-06-24",
-      assignments: [assignment(1, dutyBs.id, bs.id, "BS")],
-      leaveDays: []
-    });
-    expect(error).toContain("tối đa 1");
-  });
-
-  it("limits technician duty to two people per day", () => {
-    const error = validateAssignmentInput({
-      unit: dutyKtv,
-      staff: { ...ktv, id: 22 },
-      date: "2026-06-24",
-      assignments: [assignment(1, dutyKtv.id, 20, "KTV"), assignment(2, dutyKtv.id, 21, "KTV")],
-      leaveDays: []
-    });
-    expect(error).toContain("tối đa 2");
-  });
-
-  it("blocks assignment when staff is on leave", () => {
-    const error = validateAssignmentInput({
-      unit: dutyBs,
-      staff: bs,
-      date: "2026-06-24",
-      assignments: [],
-      leaveDays: [leave(1, bs.id, "BS")]
-    });
-    expect(error).toContain("đang nghỉ phép");
-  });
-
-  it("allows TKYK in technician work schedule", () => {
-    const error = validateAssignmentInput({
-      unit: workKtv,
-      staff: tkyk,
-      date: "2026-06-24",
-      assignments: [],
-      leaveDays: []
-    });
-    expect(error).toBeNull();
-  });
-
-  it("blocks TKYK from technician duty schedule", () => {
-    const error = validateAssignmentInput({
-      unit: dutyKtv,
-      staff: tkyk,
-      date: "2026-06-24",
-      assignments: [],
-      leaveDays: []
-    });
-    expect(error).toContain("chỉ nhận KTV");
-  });
-
-  it("limits leave to two staff per type per day", () => {
-    const error = validateLeaveInput({
-      staff: { ...bs, id: 12 },
-      dates: ["2026-06-24"],
-      leaveDays: [leave(1, 10, "BS"), leave(2, 11, "BS")]
-    });
-    expect(error).toContain("đã đủ 2 BS");
-  });
-
-  it.each([
-    ["BS", bs],
-    ["KTV", ktv],
-    ["TKYK", tkyk]
-  ] as const)("disables a full %s leave date", (staffType, staff) => {
-    const error = getLeaveDateBlockReason(
-      { ...staff, id: 99 },
-      "2026-07-16",
-      [leave(1, 10, staffType, "2026-07-16"), leave(2, 11, staffType, "2026-07-16")]
-    );
-    expect(error).toContain(`đã đủ 2 ${staffType}`);
+  it("tóm tắt điểm danh", () => {
+    expect(attendanceSummary(0, 0)).toBe("Chưa có phân công");
+    expect(attendanceSummary(2, 5)).toBe("2/5 khoa phòng có mặt");
   });
 });

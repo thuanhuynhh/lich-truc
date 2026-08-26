@@ -20,15 +20,13 @@ export interface DatabaseResult<T = Record<string, unknown>> {
 }
 
 const identityTables = new Set([
-  "staff",
+  "departments",
   "users",
-  "schedule_units",
-  "unit_rotation_members",
-  "schedule_assignments",
-  "leave_requests",
-  "leave_days",
-  "audit_logs",
-  "swap_requests"
+  "assignments",
+  "coordinator_assignments",
+  "swap_requests",
+  "rotation_members",
+  "audit_logs"
 ]);
 
 function postgresSql(sql: string): string {
