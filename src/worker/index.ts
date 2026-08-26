@@ -24,11 +24,14 @@ import {
   formatFullDate,
   isDaySession,
   isIsoDate,
+  monthOfWeek,
   monthRange,
   normalizeMonth,
+  normalizeWeekStart,
   rotationAssignmentsForWorkDays,
   sessionLabel,
-  todayInVietnam
+  todayInVietnam,
+  weekRange
 } from "../shared/schedule";
 import { getAuditActionValues } from "../shared/audit";
 import {
@@ -875,8 +878,11 @@ async function listNotifications(env: Env, user: User): Promise<Array<Omit<Notif
 }
 
 async function getSchedule(env: Env, url: URL, user: User): Promise<Response> {
-  const month = normalizeMonth(url.searchParams.get("month"));
-  const { from, to } = monthRange(month);
+  const weekStart = normalizeWeekStart(url.searchParams.get("weekStart"));
+  const { from, to } = weekRange(weekStart);
+  // Tab "Ngày làm việc" quản lý theo tháng nên trả kèm cả tháng chứa tuần này.
+  const month = monthOfWeek(weekStart);
+  const monthBounds = monthRange(month);
   const settings = await getSettings(env);
   const [
     workDays,
@@ -887,7 +893,8 @@ async function getSchedule(env: Env, url: URL, user: User): Promise<Response> {
     coordinators,
     coordinatorAssignments,
     rotations,
-    auditLogs
+    auditLogs,
+    monthWorkDays
   ] = await Promise.all([
     listWorkDays(env, from, to),
     listSections(env),
@@ -897,12 +904,15 @@ async function getSchedule(env: Env, url: URL, user: User): Promise<Response> {
     listCoordinators(env),
     listCoordinatorAssignments(env, from, to),
     listRotations(env),
-    listAuditLogs(env, from, to, auditFiltersForUser(user))
+    listAuditLogs(env, from, to, auditFiltersForUser(user)),
+    listWorkDaysWithCounts(env, monthBounds.from, monthBounds.to)
   ]);
 
   const response: ScheduleResponse = {
+    weekStart,
     month,
     workDays,
+    monthWorkDays,
     sections,
     positions,
     departments,
@@ -921,6 +931,19 @@ async function listWorkDays(env: Env, from: string, to: string): Promise<WorkDay
     "SELECT date, session, note FROM work_days WHERE date BETWEEN ? AND ? ORDER BY date"
   ).bind(from, to).all<WorkDayRow>();
   return results.map(mapWorkDayRow);
+}
+
+/** Ngày làm kèm số phân công, dùng cho trang quản lý ngày làm theo tháng. */
+async function listWorkDaysWithCounts(env: Env, from: string, to: string): Promise<WorkDay[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT w.date, w.session, w.note, COUNT(a.id) AS assignment_count
+     FROM work_days w
+     LEFT JOIN assignments a ON a.date = w.date
+     WHERE w.date BETWEEN ? AND ?
+     GROUP BY w.date, w.session, w.note
+     ORDER BY w.date`
+  ).bind(from, to).all<WorkDayRow & { assignment_count: number }>();
+  return results.map((row) => ({ ...mapWorkDayRow(row), assignmentCount: Number(row.assignment_count || 0) }));
 }
 
 async function listAssignments(env: Env, from: string, to: string): Promise<Assignment[]> {
@@ -1161,20 +1184,22 @@ async function deleteAssignment(env: Env, user: User, id: number): Promise<Respo
   return json({ ok: true });
 }
 
-export function clearScheduleStatement(scope: "month" | "date", value: string): { sql: string; bindings: string[] } {
-  return scope === "date"
-    ? { sql: "DELETE FROM assignments WHERE date = ?", bindings: [value] }
-    : { sql: "DELETE FROM assignments WHERE date BETWEEN ? AND ?", bindings: [monthRange(value).from, monthRange(value).to] };
+export function clearScheduleStatement(from: string, to: string): { sql: string; bindings: string[] } {
+  return from === to
+    ? { sql: "DELETE FROM assignments WHERE date = ?", bindings: [from] }
+    : { sql: "DELETE FROM assignments WHERE date BETWEEN ? AND ?", bindings: [from, to] };
 }
 
 async function clearSchedule(request: Request, env: Env, user: User): Promise<Response> {
   requireScheduler(user);
-  const body = await readJson<{ month?: string; date?: string }>(request);
-  const scope: "month" | "date" = body.date ? "date" : "month";
-  const value = scope === "date" ? String(body.date).slice(0, 10) : normalizeMonth(body.month);
-  if (scope === "date" && !isIsoDate(value)) throw new HttpError(400, "Ngày cần xóa không hợp lệ.");
+  const body = await readJson<{ from?: string; to?: string; date?: string }>(request);
+  const from = String(body.date || body.from || "").slice(0, 10);
+  const to = String(body.date || body.to || from).slice(0, 10);
+  if (!isIsoDate(from) || !isIsoDate(to) || to < from) {
+    throw new HttpError(400, "Khoảng ngày cần xóa không hợp lệ.");
+  }
 
-  const statement = clearScheduleStatement(scope, value);
+  const statement = clearScheduleStatement(from, to);
   const result = await env.DB.prepare(statement.sql).bind(...statement.bindings).run();
   await audit(
     env,
@@ -1182,9 +1207,9 @@ async function clearSchedule(request: Request, env: Env, user: User): Promise<Re
     "delete",
     "assignment",
     null,
-    scope === "date"
-      ? `Xóa toàn bộ phân công ngày ${formatFullDate(value)}`
-      : `Xóa toàn bộ phân công tháng ${value}`
+    from === to
+      ? `Xóa toàn bộ phân công ngày ${formatFullDate(from)}`
+      : `Xóa toàn bộ phân công từ ${formatFullDate(from)} đến ${formatFullDate(to)}`
   );
   return json({ ok: true, deleted: result.meta.changes || 0 });
 }
@@ -1604,9 +1629,12 @@ async function applyRotation(
   positionId: number | null
 ): Promise<Response> {
   requireScheduler(user);
-  const body = await readJson<{ month?: string }>(request);
-  const month = normalizeMonth(body.month);
-  const { from, to } = monthRange(month);
+  const body = await readJson<{ from?: string; to?: string }>(request);
+  const from = String(body.from || "").slice(0, 10);
+  const to = String(body.to || "").slice(0, 10);
+  if (!isIsoDate(from) || !isIsoDate(to) || to < from) {
+    throw new HttpError(400, "Khoảng ngày áp tua không hợp lệ.");
+  }
 
   const allRotations = await listRotations(env);
   const rotations = allRotations.filter(
@@ -1620,8 +1648,9 @@ async function applyRotation(
   }
 
   const workDays = await listWorkDays(env, from, to);
-  if (workDays.length === 0) throw new HttpError(400, `Tháng ${month} chưa có ngày làm nào.`);
-  const workDayDates = workDays.map((workDay) => workDay.date);
+  if (workDays.length === 0) {
+    throw new HttpError(400, `Từ ${formatFullDate(from)} đến ${formatFullDate(to)} chưa có ngày làm nào.`);
+  }
 
   const existing = await listAssignments(env, from, to);
   const persons = new Map(
@@ -1639,7 +1668,14 @@ async function applyRotation(
   let restored = 0;
 
   for (const rotation of rotations) {
-    const planned = rotationAssignmentsForWorkDays(workDayDates, rotation.turns, rotation.startDate);
+    // Chỉ số tua phải tính trên toàn bộ chuỗi ngày làm kể từ ngày bắt đầu tua,
+    // không chỉ trong khoảng đang áp, nếu không áp từng tuần sẽ luôn về tua 1.
+    const sequenceDays = await listWorkDays(env, rotation.startDate < from ? rotation.startDate : from, to);
+    const planned = rotationAssignmentsForWorkDays(
+      sequenceDays.map((workDay) => workDay.date),
+      rotation.turns,
+      rotation.startDate
+    ).filter((item) => item.date >= from && item.date <= to);
     if (planned.length === 0) continue;
     statements.push(
       env.DB.prepare("DELETE FROM assignments WHERE position_id = ? AND date BETWEEN ? AND ?")
@@ -1668,39 +1704,47 @@ async function applyRotation(
   }
 
   if (statements.length === 0) {
-    throw new HttpError(400, `Không có ngày làm nào trong tháng ${month} tính từ ngày bắt đầu tua.`);
+    throw new HttpError(400, "Không có ngày làm nào trong khoảng này tính từ ngày bắt đầu tua.");
   }
 
   await env.DB.batch(statements);
   const scope = positionId === null
     ? `${rotations.length} vị trí`
     : positions.find((position) => position.id === positionId)?.label || "vị trí";
+  const rangeLabel = from === to ? formatFullDate(from) : `${formatFullDate(from)} - ${formatFullDate(to)}`;
   await audit(
     env,
     user.id,
     "apply",
     "rotation",
     positionId,
-    `Áp tua ${scope} cho tháng ${month}: ${created} phân công, giữ lại ${restored} người đã điền`
+    `Áp tua ${scope} cho ${rangeLabel}: ${created} phân công, giữ lại ${restored} người đã điền`
   );
   return json({ ok: true, created, restored });
 }
 
 async function getAudit(env: Env, url: URL, user: User): Promise<Response> {
-  const month = normalizeMonth(url.searchParams.get("month"));
-  const { from, to } = monthRange(month);
+  const weekStart = normalizeWeekStart(url.searchParams.get("weekStart"));
+  const { from, to } = weekRange(weekStart);
   const logs = await listAuditLogs(env, from, to, auditFiltersForUser(user, url));
   return json({ auditLogs: logs });
 }
 
 async function deleteAuditEndpoint(env: Env, url: URL, user: User): Promise<Response> {
   requireAdmin(user);
-  const month = normalizeMonth(url.searchParams.get("month"));
-  const { from, to } = monthRange(month);
+  const weekStart = normalizeWeekStart(url.searchParams.get("weekStart"));
+  const { from, to } = weekRange(weekStart);
   await env.DB.prepare("DELETE FROM audit_logs WHERE created_at >= ? AND created_at < ?")
     .bind(`${from}T00:00:00Z`, `${addDays(to, 1)}T00:00:00Z`)
     .run();
-  await audit(env, user.id, "delete", "audit", null, `Xóa lịch sử thay đổi tháng ${month}`);
+  await audit(
+    env,
+    user.id,
+    "delete",
+    "audit",
+    null,
+    `Xóa lịch sử thay đổi tuần ${formatFullDate(from)} - ${formatFullDate(to)}`
+  );
   return json({ ok: true });
 }
 

@@ -61,7 +61,7 @@ export const api = {
       body: JSON.stringify({ all: true })
     }),
 
-  schedule: (month: string) => request<ScheduleResponse>(`/api/schedule?month=${month}`),
+  schedule: (weekStart: string) => request<ScheduleResponse>(`/api/schedule?weekStart=${weekStart}`),
 
   departments: () => request<{ departments: Department[] }>("/api/departments"),
   createDepartment: (body: { name: string }) =>
@@ -141,7 +141,7 @@ export const api = {
     }),
   deleteAssignment: (id: number) =>
     request<{ ok: boolean }>(`/api/schedule/assignment/${id}`, { method: "DELETE" }),
-  clearSchedule: (body: { month?: string; date?: string }) =>
+  clearSchedule: (body: { from?: string; to?: string; date?: string }) =>
     request<{ ok: boolean; deleted: number }>("/api/schedule/clear", {
       method: "POST",
       body: JSON.stringify(body)
@@ -177,7 +177,7 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body)
     }),
-  applyRotation: (positionId: number | null, body: { month: string }) =>
+  applyRotation: (positionId: number | null, body: { from: string; to: string }) =>
     request<{ ok: boolean; created: number; restored: number }>(
       positionId === null ? "/api/rotations/apply" : `/api/rotations/${positionId}/apply`,
       { method: "POST", body: JSON.stringify(body) }
@@ -213,14 +213,15 @@ export const api = {
     }),
   deleteUser: (id: number) => request<{ users: User[] }>(`/api/users/${id}`, { method: "DELETE" }),
 
-  audit: (month: string, filters: { actor?: string; action?: string; q?: string } = {}) => {
-    const params = new URLSearchParams({ month });
+  audit: (weekStart: string, filters: { actor?: string; action?: string; q?: string } = {}) => {
+    const params = new URLSearchParams({ weekStart });
     Object.entries(filters).forEach(([key, value]) => {
       if (value) params.set(key, value);
     });
     return request<{ auditLogs: AuditLog[] }>(`/api/audit?${params.toString()}`);
   },
-  clearAudit: (month: string) => request<{ ok: boolean }>(`/api/audit?month=${month}`, { method: "DELETE" }),
+  clearAudit: (weekStart: string) =>
+    request<{ ok: boolean }>(`/api/audit?weekStart=${weekStart}`, { method: "DELETE" }),
 
   getSettings: () => request<SettingsResponse>("/api/settings"),
   saveSettings: (body: Partial<SystemSettings>) =>

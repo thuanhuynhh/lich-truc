@@ -3619,7 +3619,7 @@ button:focus-visible {
    Số cột của bảng lịch bằng số ngày làm trong tháng, nên lưới dùng biến
    --day-count do ScheduleView đặt trên .schedule-table-wrap. */
 .schedule-table-wrap {
-  --day-column: 168px;
+  --day-column: 200px;
 }
 
 .schedule-grid {
@@ -4214,4 +4214,18 @@ input[type="radio"]:disabled {
   .attendance-row {
     grid-template-columns: 1fr;
   }
+}
+
+/* Nút tuần hiện tại: dòng ngày + dòng tháng nhỏ bên dưới. */
+.week-pill {
+  display: inline-grid;
+  justify-items: center;
+  gap: 0;
+  line-height: 1.2;
+}
+
+.week-pill small {
+  font-size: .7rem;
+  font-weight: 600;
+  opacity: .75;
 }

@@ -17,9 +17,11 @@ import {
   SESSION_LABELS,
   formatFullDate,
   formatMonthLabel,
+  formatWeekLabel,
   getDayOfWeekLabel,
   monthRange,
-  todayInVietnam
+  todayInVietnam,
+  weekRange
 } from "../shared/schedule";
 import { DepartmentSearchSelect, PanelTitle } from "./common";
 
@@ -39,12 +41,12 @@ export function WorkDaysView({
     const today = todayInVietnam();
     return today.slice(0, 7) === data.month ? today : from;
   });
+  const workDays = data.monthWorkDays;
   const [session, setSession] = useState<DaySession>("full");
   const [note, setNote] = useState("");
   const [editing, setEditing] = useState<Record<string, { session: DaySession; note: string }>>({});
 
-  const assignmentCount = (workDay: WorkDay) =>
-    data.assignments.filter((assignment) => assignment.date === workDay.date).length;
+  const assignmentCount = (workDay: WorkDay) => workDay.assignmentCount ?? 0;
 
   return (
     <main className="content-grid">
@@ -88,7 +90,7 @@ export function WorkDaysView({
 
       <section className="panel wide-panel">
         <PanelTitle icon={<CalendarDays size={17} />} title={`Ngày làm việc ${formatMonthLabel(data.month)}`} />
-        {data.workDays.length === 0 ? (
+        {workDays.length === 0 ? (
           <span className="empty-note">Tháng này chưa có ngày làm việc nào.</span>
         ) : (
           <div className="workday-table" role="table">
@@ -99,7 +101,7 @@ export function WorkDaysView({
               <span role="columnheader">Phân công</span>
               <span role="columnheader">Thao tác</span>
             </div>
-            {data.workDays.map((workDay) => {
+            {workDays.map((workDay) => {
               const draft = editing[workDay.date];
               return (
                 <div className="workday-row" role="row" key={workDay.date}>
@@ -200,29 +202,33 @@ export function WorkDaysView({
 }
 
 export function RotationDialog({
+  weekStart,
   month,
   position,
   departments,
   rotation,
-  workDayCount,
+  weekWorkDayCount,
+  monthWorkDayCount,
   onClose,
   onSave,
   onApply
 }: {
+  weekStart: string;
   month: string;
   position: Position;
   departments: Department[];
   rotation: Rotation | null;
-  workDayCount: number;
+  weekWorkDayCount: number;
+  monthWorkDayCount: number;
   onClose: () => void;
   onSave: (payload: { startDate: string; turns: number[][] }) => void;
-  onApply: (payload: { startDate: string; turns: number[][] }) => void;
+  onApply: (payload: { startDate: string; turns: number[][] }, scope: "week" | "month") => void;
 }) {
   const activeDepartments = departments.filter((department) => department.active);
   const existingTurns = (rotation?.turns || [])
     .filter((turn) => Array.isArray(turn) && turn.length > 0)
     .map((turn) => turn.map((member) => member.departmentId));
-  const [startDate, setStartDate] = useState(rotation?.startDate || monthRange(month).from);
+  const [startDate, setStartDate] = useState(rotation?.startDate || weekRange(weekStart).from);
   const [turns, setTurns] = useState<number[][]>(existingTurns.length ? existingTurns : [[]]);
   const [picker, setPicker] = useState<Record<number, number | "">>({});
   const [draggedTurnIndex, setDraggedTurnIndex] = useState<number | null>(null);
@@ -243,8 +249,9 @@ export function RotationDialog({
             <h2>Tua khám · {position.label}</h2>
             <p>
               Tua 1 áp cho ngày làm đầu tiên tính từ ngày bắt đầu, các ngày làm tiếp theo xoay lần lượt theo thứ tự tua.
-              Mỗi tua có thể gồm nhiều khoa phòng cùng đứng vị trí này. Tháng{" "}
-              {formatMonthLabel(month).toLowerCase()} đang có {workDayCount} ngày làm.
+              Mỗi tua có thể gồm nhiều khoa phòng cùng đứng vị trí này. Tuần {formatWeekLabel(weekStart)} có{" "}
+              {weekWorkDayCount} ngày làm, cả {formatMonthLabel(month).toLowerCase()} có{" "}
+              {monthWorkDayCount} ngày làm.
             </p>
           </div>
           <button type="button" className="icon-btn" onClick={onClose} aria-label="Đóng">×</button>
@@ -353,11 +360,19 @@ export function RotationDialog({
           </button>
           <button
             type="button"
+            className="tool-btn"
+            disabled={!valid}
+            onClick={() => onApply({ startDate, turns }, "week")}
+          >
+            <RefreshCw size={15} /> Lưu và áp tuần này
+          </button>
+          <button
+            type="button"
             className="primary-btn"
             disabled={!valid}
-            onClick={() => onApply({ startDate, turns })}
+            onClick={() => onApply({ startDate, turns }, "month")}
           >
-            <RefreshCw size={15} /> Lưu và áp cho tháng này
+            <RefreshCw size={15} /> Lưu và áp cả tháng
           </button>
         </div>
       </div>

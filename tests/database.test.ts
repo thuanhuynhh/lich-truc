@@ -109,14 +109,14 @@ describe("câu lệnh SQL của worker", () => {
     expect(insert.bindings).toEqual([3, 0, 10, 0, 3, 0, 11, 1, 3, 1, 12, 0]);
   });
 
-  it("xóa phân công theo ngày hoặc theo cả tháng", () => {
-    expect(clearScheduleStatement("date", "2026-09-05")).toEqual({
+  it("xóa phân công theo một ngày hoặc theo khoảng ngày", () => {
+    expect(clearScheduleStatement("2026-09-05", "2026-09-05")).toEqual({
       sql: "DELETE FROM assignments WHERE date = ?",
       bindings: ["2026-09-05"]
     });
-    expect(clearScheduleStatement("month", "2026-09")).toEqual({
+    expect(clearScheduleStatement("2026-09-07", "2026-09-13")).toEqual({
       sql: "DELETE FROM assignments WHERE date BETWEEN ? AND ?",
-      bindings: ["2026-09-01", "2026-09-30"]
+      bindings: ["2026-09-07", "2026-09-13"]
     });
   });
 });

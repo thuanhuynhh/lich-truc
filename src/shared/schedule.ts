@@ -83,6 +83,42 @@ export function monthRange(month: string): { from: string; to: string } {
   };
 }
 
+/** Thứ hai của tuần chứa ngày đã cho. */
+export function normalizeWeekStart(value: string | null | undefined): string {
+  const date = value && isIsoDate(value.slice(0, 10)) ? value.slice(0, 10) : todayInVietnam();
+  const day = new Date(`${date}T00:00:00Z`).getUTCDay();
+  return addDays(date, day === 0 ? -6 : 1 - day);
+}
+
+/** Bảy ngày của tuần, từ thứ hai đến chủ nhật. */
+export function getWeekDays(weekStart: string): string[] {
+  const start = normalizeWeekStart(weekStart);
+  return Array.from({ length: 7 }, (_, index) => addDays(start, index));
+}
+
+export function weekRange(weekStart: string): { from: string; to: string } {
+  const from = normalizeWeekStart(weekStart);
+  return { from, to: addDays(from, 6) };
+}
+
+/** 05/09 - 11/09 · tháng 9/2026 */
+export function formatWeekLabel(weekStart: string): string {
+  const { from, to } = weekRange(weekStart);
+  return `${formatDate(from)} - ${formatDate(to)}`;
+}
+
+/**
+ * Tháng của một tuần, lấy theo thứ năm giữa tuần. Nhờ vậy tuần vắt qua hai
+ * tháng được xếp vào tháng chiếm phần lớn tuần đó.
+ */
+export function monthOfWeek(weekStart: string): string {
+  return addDays(normalizeWeekStart(weekStart), 3).slice(0, 7);
+}
+
+export function addWeeks(weekStart: string, delta: number): string {
+  return addDays(normalizeWeekStart(weekStart), delta * 7);
+}
+
 export function addMonths(month: string, delta: number): string {
   const normalized = normalizeMonth(month);
   const [year, monthNumber] = normalized.split("-").map(Number);

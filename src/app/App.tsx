@@ -33,12 +33,16 @@ import type {
   WorkDay
 } from "../shared/types";
 import {
-  addMonths,
-  currentMonthInVietnam,
+  addWeeks,
   formatFullDate,
   formatMonthLabel,
   formatVietnamDateTime,
-  normalizeMonth
+  formatWeekLabel,
+  monthOfWeek,
+  monthRange,
+  normalizeWeekStart,
+  todayInVietnam,
+  weekRange
 } from "../shared/schedule";
 import { canManageSchedule, roleLabel } from "../shared/validation";
 
@@ -48,7 +52,7 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loginError, setLoginError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [month, setMonth] = useState(() => currentMonthInVietnam());
+  const [weekStart, setWeekStart] = useState(() => normalizeWeekStart(todayInVietnam()));
   const [data, setData] = useState<ScheduleResponse | null>(null);
   const [view, setView] = useState<View>("schedule");
   const [toast, setToast] = useState("");
@@ -65,9 +69,9 @@ export default function App() {
 
   const tableRef = useRef<HTMLDivElement | null>(null);
   const refreshSequence = useRef(0);
-  const currentMonthRef = useRef(month);
+  const currentWeekRef = useRef(weekStart);
   const currentUserRef = useRef<User | null>(user);
-  currentMonthRef.current = month;
+  currentWeekRef.current = weekStart;
   currentUserRef.current = user;
 
   const isAdmin = user?.role === "admin";
@@ -85,11 +89,11 @@ export default function App() {
     refreshSequence.current += 1;
     setData(null);
     if (user) {
-      void refresh(month, user.id).catch((error) => {
+      void refresh(weekStart, user.id).catch((error) => {
         notify(error instanceof Error ? error.message : "Không thể tải lịch.");
       });
     }
-  }, [user, month]);
+  }, [user, weekStart]);
 
   useEffect(() => {
     if (!user) {
@@ -130,12 +134,12 @@ export default function App() {
     }
   }
 
-  async function refresh(targetMonth = month, targetUserId = user?.id) {
+  async function refresh(targetWeek = weekStart, targetUserId = user?.id) {
     const sequence = ++refreshSequence.current;
-    const response = await api.schedule(targetMonth);
+    const response = await api.schedule(targetWeek);
     if (
       sequence === refreshSequence.current &&
-      targetMonth === currentMonthRef.current &&
+      targetWeek === currentWeekRef.current &&
       targetUserId === currentUserRef.current?.id
     ) {
       setData(response);
@@ -284,7 +288,7 @@ export default function App() {
                   return;
                 }
                 if (item.actionDate) {
-                  setMonth(normalizeMonth(item.actionDate));
+                  setWeekStart(normalizeWeekStart(item.actionDate));
                   if (item.actionView === "report") {
                     setReportNavigation((current) => ({
                       date: item.actionDate as string,
@@ -300,23 +304,29 @@ export default function App() {
         </div>
 
         <div className="header-controls">
-          <div className="week-tools" aria-label="Điều hướng tháng">
+          <div className="week-tools" aria-label="Điều hướng tuần">
             <button
               type="button"
               className="icon-btn"
-              onClick={() => setMonth(addMonths(month, -1))}
-              aria-label="Tháng trước"
+              onClick={() => setWeekStart(addWeeks(weekStart, -1))}
+              aria-label="Tuần trước"
             >
               <ChevronLeft size={18} />
             </button>
-            <button type="button" className="week-pill" onClick={() => setMonth(currentMonthInVietnam())}>
-              {formatMonthLabel(month)}
+            <button
+              type="button"
+              className="week-pill"
+              title="Về tuần hiện tại"
+              onClick={() => setWeekStart(normalizeWeekStart(todayInVietnam()))}
+            >
+              {formatWeekLabel(weekStart)}
+              <small>{formatMonthLabel(data?.month || monthOfWeek(weekStart))}</small>
             </button>
             <button
               type="button"
               className="icon-btn"
-              onClick={() => setMonth(addMonths(month, 1))}
-              aria-label="Tháng sau"
+              onClick={() => setWeekStart(addWeeks(weekStart, 1))}
+              aria-label="Tuần sau"
             >
               <ChevronRight size={18} />
             </button>
@@ -341,31 +351,31 @@ export default function App() {
               <button
                 type="button"
                 className="tool-btn"
-                title="Áp tua của mọi vị trí cho tháng đang xem"
+                title="Áp tua của mọi vị trí cho tuần đang xem"
                 onClick={() => {
-                  if (!window.confirm(`Áp tua của mọi vị trí cho ${formatMonthLabel(month).toLowerCase()}?`)) return;
+                  if (!window.confirm(`Áp tua của mọi vị trí cho tuần ${formatWeekLabel(weekStart)}?`)) return;
                   void run(async () => {
-                    const result = await api.applyRotation(null, { month });
+                    const result = await api.applyRotation(null, weekRange(weekStart));
                     await refresh();
-                    notify(`Đã áp tua: ${result.created} phân công, giữ lại ${result.restored} người đã điền`);
+                    notify(`Đã áp tua tuần này: ${result.created} phân công, giữ lại ${result.restored} người đã điền`);
                   });
                 }}
               >
-                <ListOrdered size={16} /> <span className="btn-text">Áp tua tất cả</span>
+                <ListOrdered size={16} /> <span className="btn-text">Áp tua tuần</span>
               </button>
             )}
             {canSchedule && (
               <button
                 type="button"
                 className="icon-btn danger-tool"
-                title="Xóa toàn bộ phân công tháng này"
-                aria-label="Xóa toàn bộ phân công tháng này"
+                title="Xóa toàn bộ phân công tuần này"
+                aria-label="Xóa toàn bộ phân công tuần này"
                 onClick={() => {
-                  if (!window.confirm(`Xóa toàn bộ phân công khoa phòng của ${formatMonthLabel(month).toLowerCase()}?`)) {
+                  if (!window.confirm(`Xóa toàn bộ phân công khoa phòng của tuần ${formatWeekLabel(weekStart)}?`)) {
                     return;
                   }
                   void run(async () => {
-                    const result = await api.clearSchedule({ month });
+                    const result = await api.clearSchedule(weekRange(weekStart));
                     await refresh();
                     notify(`Đã xóa ${result.deleted} phân công`);
                   });
@@ -453,9 +463,9 @@ export default function App() {
               }
               onOpenRotation={setRotationPosition}
               onApplyRotation={(position) => {
-                if (!window.confirm(`Áp tua của ${position.label} cho ${formatMonthLabel(month).toLowerCase()}?`)) return;
+                if (!window.confirm(`Áp tua của ${position.label} cho tuần ${formatWeekLabel(weekStart)}?`)) return;
                 void run(async () => {
-                  const result = await api.applyRotation(position.id, { month });
+                  const result = await api.applyRotation(position.id, weekRange(weekStart));
                   await refresh();
                   notify(`Đã áp tua ${position.label}: ${result.created} phân công, giữ lại ${result.restored} người đã điền`);
                 });
@@ -576,7 +586,7 @@ export default function App() {
       )}
 
       {view === "history" && data && (
-        <HistoryView data={data} month={month} isAdmin={isAdmin} notify={notify} />
+        <HistoryView data={data} weekStart={weekStart} isAdmin={isAdmin} notify={notify} />
       )}
 
       {view === "settings" && isAdmin && (
@@ -650,11 +660,13 @@ export default function App() {
 
       {rotationPosition && data && (
         <RotationDialog
-          month={month}
+          weekStart={weekStart}
+          month={data.month}
           position={rotationPosition}
           departments={data.departments}
           rotation={data.rotations.find((item) => item.positionId === rotationPosition.id) || null}
-          workDayCount={data.workDays.length}
+          weekWorkDayCount={data.workDays.length}
+          monthWorkDayCount={data.monthWorkDays.length}
           onClose={() => setRotationPosition(null)}
           onSave={(payload) =>
             void run(async () => {
@@ -662,13 +674,17 @@ export default function App() {
               await refresh();
             }, `Đã lưu tua ${rotationPosition.label}`)
           }
-          onApply={(payload) =>
+          onApply={(payload, scope) =>
             void run(async () => {
               await api.saveRotation(rotationPosition.id, payload);
-              const result = await api.applyRotation(rotationPosition.id, { month });
+              const range = scope === "month" ? monthRange(data.month) : weekRange(weekStart);
+              const result = await api.applyRotation(rotationPosition.id, range);
               await refresh();
               setRotationPosition(null);
-              notify(`Đã áp tua ${rotationPosition.label}: ${result.created} phân công, giữ lại ${result.restored} người đã điền`);
+              notify(
+                `Đã áp tua ${rotationPosition.label} cho ${scope === "month" ? "cả tháng" : "tuần này"}: ` +
+                  `${result.created} phân công, giữ lại ${result.restored} người đã điền`
+              );
             })
           }
         />

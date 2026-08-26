@@ -40,6 +40,8 @@ export interface WorkDay {
   date: string;
   session: DaySession;
   note: string | null;
+  /** Chỉ có ở danh sách ngày làm theo tháng dùng cho trang quản lý. */
+  assignmentCount?: number;
 }
 
 export interface Assignment {
@@ -110,8 +112,14 @@ export interface Rotation {
 }
 
 export interface ScheduleResponse {
+  /** Thứ hai của tuần đang xem. */
+  weekStart: string;
+  /** Tháng chứa tuần đang xem, dùng cho trang quản lý ngày làm. */
   month: string;
+  /** Ngày làm trong tuần đang xem, mỗi ngày là một cột của bảng lịch. */
   workDays: WorkDay[];
+  /** Toàn bộ ngày làm của tháng, dùng cho trang quản lý ngày làm. */
+  monthWorkDays: WorkDay[];
   sections: Section[];
   positions: Position[];
   departments: Department[];
