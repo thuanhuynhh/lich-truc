@@ -1,7 +1,13 @@
 import { types as pgTypes } from "pg";
 import { describe, expect, it } from "vitest";
 import { PostgresDatabase } from "../src/worker/database";
-import { dutyReportUpdateWhere, passwordResetSessionCleanup, usernameAvailabilityLookup } from "../src/worker/index";
+import {
+  dutyReportUpdateWhere,
+  passwordResetSessionCleanup,
+  rotationMembersInsert,
+  rotationStaffLookup,
+  usernameAvailabilityLookup
+} from "../src/worker/index";
 
 describe("PostgreSQL type mapping", () => {
   it("keeps DATE values as YYYY-MM-DD strings", () => {
@@ -63,5 +69,23 @@ describe("PostgreSQL type mapping", () => {
     expect(dutyReportUpdateWhere("admin")).toBe("date = ?");
     expect(dutyReportUpdateWhere("bs")).toBe("date = ?");
     expect(dutyReportUpdateWhere("ktv")).toBe("date = ?");
+  });
+
+  it("loads all rotation staff in one query", () => {
+    const lookup = rotationStaffLookup(Array.from({ length: 25 }, (_, index) => index + 1));
+
+    expect(lookup.sql.match(/\?/g)).toHaveLength(25);
+    expect(lookup.sql).toContain("FROM staff WHERE id IN");
+    expect(lookup.bindings).toHaveLength(25);
+  });
+
+  it("inserts more than 20 rotation turns with one statement", () => {
+    const turns = Array.from({ length: 25 }, (_, index) => [index + 1]);
+    const insert = rotationMembersInsert(7, turns);
+
+    expect(insert.sql.match(/\(\?, \?, \?, \?\)/g)).toHaveLength(25);
+    expect(insert.sql.match(/INSERT INTO unit_rotation_members/g)).toHaveLength(1);
+    expect(insert.bindings).toHaveLength(100);
+    expect(insert.bindings.slice(0, 8)).toEqual([7, 0, 1, 0, 7, 1, 2, 0]);
   });
 });

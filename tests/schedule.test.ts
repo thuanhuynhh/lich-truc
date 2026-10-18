@@ -149,6 +149,14 @@ describe("schedule date rules", () => {
     expect(rotationTurnIndex("2026-07-23", "2026-07-30", "weekly", 3)).toBe(1);
   });
 
+  it("keeps the chosen turn on the chosen start date once the dialog shifts it back to turn 1", () => {
+    // The dialog stores the date turn 1 falls on: startDate - turnIndex (x7 in weekly mode).
+    for (const turnIndex of [0, 1, 2]) {
+      expect(rotationTurnIndex(addDays("2026-07-23", -turnIndex), "2026-07-23", "daily", 3)).toBe(turnIndex);
+      expect(rotationTurnIndex(addDays("2026-07-20", -turnIndex * 7), "2026-07-20", "weekly", 3)).toBe(turnIndex);
+    }
+  });
+
   it("blocks Thursday leave when Friday is the duty day", () => {
     expect(conflictsWithDutyLeave("2026-06-26", "2026-06-25")).toBe(true);
   });

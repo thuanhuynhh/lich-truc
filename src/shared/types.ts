@@ -90,7 +90,6 @@ export interface ScheduleResponse {
   leaveDays: LeaveDay[];
   nextWeekLeaveDays?: LeaveDay[];
   monthLeaveDays?: LeaveDay[];
-  auditLogs: AuditLog[];
   rotations: UnitRotation[];
   pendingLeaves?: PendingLeave[];
   approveLeaveBs?: boolean;
@@ -126,6 +125,7 @@ export interface PendingLeave {
   staffName: string;
   staffType: StaffType;
   reason: string | null;
+  registeredAt?: string;
   dates: string[];
 }
 

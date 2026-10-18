@@ -25,8 +25,8 @@ import { FormEvent, MutableRefObject, ReactNode, useEffect, useRef, useState } f
 import { api } from "./api";
 import { SignaturePad } from "./SignaturePad";
 import { ReportView } from "./ReportView";
-import type { Assignment, LeaveDay, NotificationItem, PendingLeave, Role, ScheduleResponse, ScheduleUnit, Staff, StaffType, SystemSettings, User, DutyReport } from "../shared/types";
-import { addDays, APP_TIME_ZONE, DAYS, getWeekDays, normalizeWeekStart, staffTypesForUnit, getDayOfWeekLabel, formatDate, formatLeaveRegistrationDateTime, formatVietnamDateTime, parseTimestamp, todayInVietnam } from "../shared/schedule";
+import type { Assignment, AuditLog, LeaveDay, NotificationItem, PendingLeave, Role, ScheduleResponse, ScheduleUnit, Staff, StaffType, SystemSettings, User, DutyReport } from "../shared/types";
+import { addDays, APP_TIME_ZONE, DAYS, getWeekDays, isIsoDate, normalizeWeekStart, rotationTurnIndex, staffTypesForUnit, getDayOfWeekLabel, formatDate, formatLeaveRegistrationDateTime, formatVietnamDateTime, parseTimestamp, todayInVietnam } from "../shared/schedule";
 import { getLeaveDateBlockReason } from "../shared/validation";
 
 type View = "schedule" | "leave" | "staff" | "users" | "history" | "settings" | "profile" | "report";
@@ -485,15 +485,18 @@ export default function App() {
                 onContinueRotation={(unit) => {
                   const removePostDuty = window.confirm("Bạn muốn bỏ người ra trực vào ngày ra trực không?");
                   run(async () => {
-                    await api.applyRotation(unit.id, { weekStart });
+                    const applied = await api.applyRotation(unit.id, { weekStart });
                     let deleted = 0;
                     if (removePostDuty) {
                       const result = await api.recalculateWork(weekStart);
                       deleted = result.deleted;
                     }
                     await refresh();
-                    if (removePostDuty) notify(`Đã bỏ ${deleted} phân công ngày ra trực`);
-                  }, "Đã áp dụng tiếp tục tua");
+                    notify([
+                      describeRotationApply(1, applied, "Đã áp dụng tiếp tục tua"),
+                      removePostDuty ? `bỏ ${deleted} phân công ngày ra trực` : ""
+                    ].filter(Boolean).join(", "));
+                  });
                 }}
                 onDropStaff={(unit, date, staffId) =>
                   run(async () => {
@@ -546,10 +549,11 @@ export default function App() {
                 onApply={(weeks, payload) =>
                   run(async () => {
                     await api.saveRotation(rotationUnit.id, payload);
-                    await api.applyRotation(rotationUnit.id, { weekStart, weeks });
+                    const result = await api.applyRotation(rotationUnit.id, { weekStart, weeks });
                     await refresh();
                     setRotationUnit(null);
-                  }, weeks === 1 ? "Đã áp dụng tua cho tuần" : `Đã áp dụng tua cho ${weeks} tuần`)
+                    notify(describeRotationApply(weeks, result));
+                  })
                 }
               />
             )}
@@ -590,7 +594,7 @@ export default function App() {
         <UsersView staff={data.staff} onSaved={() => run(refresh, "Đã cập nhật")} notify={notify} />
       )}
 
-      {view === "history" && data && <HistoryView data={data} weekStart={weekStart} isAdmin={isAdmin} notify={notify} />}
+      {view === "history" && <HistoryView isAdmin={isAdmin} notify={notify} />}
 
       {view === "report" && (
         <ReportView
@@ -1257,6 +1261,18 @@ function AssignmentPill({
   );
 }
 
+function describeRotationApply(
+  weeks: number,
+  result: { skippedLeaveDays: number; skipped: string[] },
+  base = weeks === 1 ? "Đã áp dụng tua cho tuần" : `Đã áp dụng tua cho ${weeks} tuần`
+): string {
+  const notes = [
+    result.skippedLeaveDays ? `bỏ qua ${result.skippedLeaveDays} ngày nghỉ phép` : "",
+    result.skipped.length ? `bỏ qua ${result.skipped.length} ngày không hợp lệ (${result.skipped[0]}${result.skipped.length > 1 ? "..." : ""})` : ""
+  ].filter(Boolean);
+  return notes.length ? `${base}, ${notes.join(", ")}` : base;
+}
+
 function RotationDialog({
   unit,
   data,
@@ -1281,11 +1297,29 @@ function RotationDialog({
   const staffList = Array.isArray(data.staff) ? data.staff : [];
   const choices = staffList.filter((staff) => staff.active && (allowedStaffTypes.length === 0 || allowedStaffTypes.includes(staff.type)));
   const forceDailyMode = unit.section === "I";
-  const [startDate, setStartDate] = useState(existing?.startDate || data.weekStart);
+  const [startDate, setStartDate] = useState(data.weekStart);
   const [mode, setMode] = useState<"daily" | "weekly">(forceDailyMode ? "daily" : existing?.mode || "daily");
   const [turns, setTurns] = useState<number[][]>(
     existingTurns.length ? existingTurns : [[]]
   );
+  // Default to the turn the saved rotation is already on for that date, so re-saving keeps the
+  // cycle where it is instead of restarting it at turn 1.
+  const [startTurn, setStartTurn] = useState(() =>
+    existing && existingTurns.length
+      ? rotationTurnIndex(existing.startDate, data.weekStart, existing.mode, existingTurns.length)
+      : 0
+  );
+  const startTurnIndex = Math.min(startTurn, Math.max(turns.length - 1, 0));
+  const effectiveMode = forceDailyMode ? "daily" : mode;
+  // unit_rotations stores the date turn 1 falls on, so shift the chosen date back by the offset of
+  // the chosen turn.
+  const payload = {
+    startDate: isIsoDate(startDate)
+      ? addDays(startDate, -startTurnIndex * (effectiveMode === "weekly" ? 7 : 1))
+      : startDate,
+    mode: effectiveMode,
+    turns
+  };
   const [draggedTurnIndex, setDraggedTurnIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [applyMenuOpen, setApplyMenuOpen] = useState(false);
@@ -1305,23 +1339,33 @@ function RotationDialog({
         <div className="modal-head">
           <div>
             <h2>{unit.section === "I" ? "Tua trực" : "Lịch làm việc"} - {unit.label}</h2>
-            <p>Tua 1 bắt đầu từ ngày chọn, các ngày sau xoay theo thứ tự tua.</p>
+            <p>Chọn ngày bắt đầu và tua chạy vào ngày đó, các ngày sau xoay theo thứ tự tua.</p>
           </div>
           <button type="button" className="icon-btn" onClick={onClose} aria-label="Đóng">×</button>
         </div>
-        <label className="field">
-          Ngày bắt đầu tua 1
-          <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
-        </label>
-        {!forceDailyMode && (
+        <div className="rotation-fields">
           <label className="field">
-            Chế độ tua
-            <select value={mode} onChange={(event) => setMode(event.target.value as "daily" | "weekly")}>
-              <option value="daily">Tua ngày</option>
-              <option value="weekly">Tua tuần</option>
+            Ngày bắt đầu
+            <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+          </label>
+          <label className="field">
+            Tua chạy ngày này
+            <select value={startTurnIndex} onChange={(event) => setStartTurn(Number(event.target.value))}>
+              {turns.map((_, index) => (
+                <option key={index} value={index}>Tua {index + 1}</option>
+              ))}
             </select>
           </label>
-        )}
+          {!forceDailyMode && (
+            <label className="field">
+              Chế độ tua
+              <select value={mode} onChange={(event) => setMode(event.target.value as "daily" | "weekly")}>
+                <option value="daily">Tua ngày</option>
+                <option value="weekly">Tua tuần</option>
+              </select>
+            </label>
+          )}
+        </div>
         <div className="turn-list">
           {turns.map((turn, turnIndex) => (
             <div
@@ -1363,6 +1407,7 @@ function RotationDialog({
             >
               <div className="turn-head">
                 <strong>Tua {turnIndex + 1}</strong>
+                {turnIndex === startTurnIndex && <span className="empty-note">chạy ngày {formatDate(startDate)}</span>}
                 <button
                   type="button"
                   className="ghost-danger"
@@ -1405,7 +1450,7 @@ function RotationDialog({
           <button type="button" className="tool-btn" onClick={() => setTurns((prev) => [...prev, []])}>
             <Plus size={16} /> Thêm tua
           </button>
-          <button type="button" className="tool-btn" onClick={() => onSave({ startDate, mode: forceDailyMode ? "daily" : mode, turns })}>
+          <button type="button" className="tool-btn" onClick={() => onSave(payload)}>
             <Save size={16} /> Lưu tua
           </button>
           <div className="action-menu">
@@ -1419,7 +1464,7 @@ function RotationDialog({
                   role="menuitem"
                   onClick={() => {
                     setApplyMenuOpen(false);
-                    onApply(1, { startDate, mode: forceDailyMode ? "daily" : mode, turns });
+                    onApply(1, payload);
                   }}
                 >
                   Áp dụng tuần này
@@ -1429,7 +1474,7 @@ function RotationDialog({
                   role="menuitem"
                   onClick={() => {
                     setApplyMenuOpen(false);
-                    onApply(4, { startDate, mode: forceDailyMode ? "daily" : mode, turns });
+                    onApply(4, payload);
                   }}
                 >
                   Áp dụng 4 tuần
@@ -1439,7 +1484,7 @@ function RotationDialog({
                   role="menuitem"
                   onClick={() => {
                     setApplyMenuOpen(false);
-                    onApply(8, { startDate, mode: forceDailyMode ? "daily" : mode, turns });
+                    onApply(8, payload);
                   }}
                 >
                   Áp dụng 8 tuần
@@ -1449,7 +1494,7 @@ function RotationDialog({
                   role="menuitem"
                   onClick={() => {
                     setApplyMenuOpen(false);
-                    onApply(12, { startDate, mode: forceDailyMode ? "daily" : mode, turns });
+                    onApply(12, payload);
                   }}
                 >
                   Áp dụng 12 tuần
@@ -1989,14 +2034,36 @@ function PendingLeavesPanel({
       <PanelTitle icon={<ClipboardList size={17} />} title={`Nghỉ phép chờ duyệt (${requests.length})`} />
       <div className="leave-list pending-leave-list">
         {requests.length === 0 && <span className="empty-note">Không có yêu cầu chờ duyệt.</span>}
-        {requests.map((req) => (
+        {requests.map((req) => {
+          const registeredAt = formatLeaveRegistrationDateTime(req.registeredAt);
+          return (
           <div className="leave-card pending-leave-card" key={req.id}>
             <div>
               <strong>{req.staffType}. {req.staffName}</strong>
               <span>{req.dates.map((date) => formatDate(date)).join(", ")}</span>
               {req.reason && <small>{req.reason}</small>}
+              {registeredAt && <span className="leave-registered-at">Đăng ký: {registeredAt}</span>}
               <span className="status-badge pending">Chờ duyệt</span>
             </div>
+            {!canApprove && (
+              <div className="pending-leave-actions">
+                <button
+                  type="button"
+                  className="ghost-danger"
+                  onClick={async () => {
+                    if (!window.confirm(`Hủy yêu cầu nghỉ phép ${req.dates.map((date) => formatDate(date)).join(", ")}?`)) return;
+                    try {
+                      await api.cancelLeave(req.id);
+                      await onRefresh?.();
+                    } catch (error) {
+                      alert(error instanceof Error ? error.message : "Hủy yêu cầu nghỉ phép thất bại.");
+                    }
+                  }}
+                >
+                  <Trash2 size={15} /> Hủy yêu cầu
+                </button>
+              </div>
+            )}
             {canApprove && (
               <div className="pending-leave-actions">
                 <button
@@ -2031,7 +2098,8 @@ function PendingLeavesPanel({
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
     </section>
   );
@@ -2750,50 +2818,64 @@ function ProfileSettingsView({
 }
 
 function HistoryView({
-  data,
-  weekStart,
   isAdmin,
   notify
 }: {
-  data: ScheduleResponse;
-  weekStart: string;
   isAdmin: boolean;
   notify: (message: string) => void;
 }) {
-  const [logs, setLogs] = useState(data.auditLogs);
-  const [filters, setFilters] = useState({ actor: "", action: "", q: "" });
-  const [page, setPage] = useState(1);
   const pageSize = 10;
-  const pageCount = Math.max(1, Math.ceil(logs.length / pageSize));
-  const visibleLogs = logs.slice((page - 1) * pageSize, page * pageSize);
-  const firstVisible = logs.length === 0 ? 0 : (page - 1) * pageSize + 1;
-  const lastVisible = Math.min(page * pageSize, logs.length);
+  const [logs, setLogs] = useState<AuditLog[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [filters, setFilters] = useState({ actor: "", action: "", q: "" });
+  // Only applied filters hit the server, so typing does not refetch on every keystroke.
+  const [appliedFilters, setAppliedFilters] = useState(filters);
+  const [reloadToken, setReloadToken] = useState(0);
+  const [page, setPage] = useState(1);
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const firstVisible = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const lastVisible = Math.min(page * pageSize, total);
 
   useEffect(() => {
-    setLogs(data.auditLogs);
-    setPage(1);
-  }, [data.auditLogs]);
+    let cancelled = false;
+    setLoading(true);
+    api.audit({ ...appliedFilters, page, limit: pageSize })
+      .then((res) => {
+        if (cancelled) return;
+        setLogs(res.auditLogs);
+        setTotal(res.total);
+      })
+      .catch((error) => {
+        if (!cancelled) notify(error instanceof Error ? error.message : "Không tải được lịch sử.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appliedFilters, page, reloadToken]);
 
   useEffect(() => {
     if (page > pageCount) setPage(pageCount);
   }, [page, pageCount]);
 
-  async function applyFilters() {
-    const res = await api.audit(weekStart, filters);
-    setLogs(res.auditLogs);
+  function applyFilters() {
     setPage(1);
+    setAppliedFilters(filters);
+    setReloadToken((token) => token + 1);
   }
 
   async function handleClearHistory() {
-    if (!window.confirm(`Bạn có chắc chắn muốn xóa toàn bộ lịch sử thay đổi của tuần ${weekStart}?`)) {
+    if (!window.confirm("Xóa TOÀN BỘ lịch sử thay đổi của hệ thống? Thao tác này không thể hoàn tác.")) {
       return;
     }
     try {
-      await api.clearAudit(weekStart);
-      notify("Đã xóa lịch sử thay đổi tuần này!");
-      const res = await api.audit(weekStart, filters);
-      setLogs(res.auditLogs);
+      const res = await api.clearAudit();
+      notify(`Đã xóa ${res.deleted} dòng lịch sử thay đổi.`);
       setPage(1);
+      setReloadToken((token) => token + 1);
     } catch (e) {
       notify(e instanceof Error ? e.message : "Xóa lịch sử thất bại");
     }
@@ -2801,13 +2883,13 @@ function HistoryView({
 
   return (
     <main className="panel history-panel">
-      <PanelTitle icon={<ClipboardList size={17} />} title="Lịch sử thay đổi tuần" />
+      <PanelTitle icon={<ClipboardList size={17} />} title="Lịch sử thay đổi" />
       {isAdmin && (
         <form
           className="history-filters"
           onSubmit={(event) => {
             event.preventDefault();
-            void applyFilters();
+            applyFilters();
           }}
         >
           <input
@@ -2846,13 +2928,13 @@ function HistoryView({
             onClick={handleClearHistory}
             style={{ marginLeft: "auto" }}
           >
-            <Trash2 size={16} /> Xóa lịch sử tuần này
+            <Trash2 size={16} /> Xóa toàn bộ lịch sử
           </button>
         </form>
       )}
-      <div className="history-list">
-        {logs.length === 0 && <span className="empty-note">Chưa có thay đổi trong tuần này.</span>}
-        {visibleLogs.map((item) => (
+      <div className="history-list" aria-busy={loading}>
+        {!loading && logs.length === 0 && <span className="empty-note">Chưa có thay đổi nào.</span>}
+        {logs.map((item) => (
           <div className="history-item" key={item.id}>
             <time>{formatDateTime(item.createdAt)}</time>
             <strong>{item.summary}</strong>
@@ -2860,10 +2942,10 @@ function HistoryView({
           </div>
         ))}
       </div>
-      {logs.length > 0 && (
+      {total > 0 && (
         <nav className="history-pagination" aria-label="Phân trang lịch sử thay đổi">
           <span className="history-page-summary">
-            Hiển thị {firstVisible}–{lastVisible} / {logs.length}
+            Hiển thị {firstVisible}–{lastVisible} / {total}
           </span>
           <div className="history-page-controls">
             <button

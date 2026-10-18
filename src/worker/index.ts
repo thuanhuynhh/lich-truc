@@ -11,7 +11,8 @@ import type {
   StaffType,
   UnitRotation,
   User,
-  SystemSettings
+  SystemSettings,
+  PendingLeave
 } from "../shared/types";
 import { acceptsStaffTypeForUnit, addDays, conflictsWithDutyLeave, getWeekDays, normalizeWeekStart, postDutyOffDate, shouldSyncPostDutyOffDate, getDayOfWeekLabel, formatDate, isIsoDate, rotationTurnIndex, todayInVietnam, workRotationAssignmentsForDates, workRotationAssignmentsForStaff } from "../shared/schedule";
 import { getAuditActionValues } from "../shared/audit";
@@ -31,6 +32,27 @@ const SESSION_DAYS = 14;
 
 export function dutyReportUpdateWhere(_role: Role): string {
   return "date = ?";
+}
+
+export function rotationStaffLookup(staffIds: number[]): { sql: string; bindings: number[] } {
+  return {
+    sql: `SELECT id, family_middle_name, name, type, active FROM staff WHERE id IN (${staffIds.map(() => "?").join(", ")})`,
+    bindings: staffIds
+  };
+}
+
+export function rotationMembersInsert(unitId: number, turns: number[][]): { sql: string; bindings: number[] } {
+  const bindings: number[] = [];
+  const values = turns.flatMap((turn, turnIndex) =>
+    turn.map((staffId, memberOrder) => {
+      bindings.push(unitId, turnIndex, staffId, memberOrder);
+      return "(?, ?, ?, ?)";
+    })
+  );
+  return {
+    sql: `INSERT INTO unit_rotation_members (unit_id, turn_index, staff_id, member_order) VALUES ${values.join(", ")}`,
+    bindings
+  };
 }
 
 export default {
@@ -129,7 +151,7 @@ async function routeApi(request: Request, env: Env, url: URL): Promise<Response>
   }
 
   if (path === "/api/audit" && method === "GET") return getAudit(env, url, user);
-  if (path === "/api/audit" && method === "DELETE") return deleteAuditEndpoint(env, url, user);
+  if (path === "/api/audit" && method === "DELETE") return deleteAuditEndpoint(env, user);
 
   // Duty reports
   if (path === "/api/reports" && method === "GET") return getReportEndpoint(env, url, user);
@@ -596,16 +618,15 @@ async function getSchedule(env: Env, url: URL, user: User): Promise<Response> {
   const monthEnd = `${year}-${String(month).padStart(2, "0")}-${String(new Date(Date.UTC(year, month, 0)).getUTCDate()).padStart(2, "0")}`;
   const settings = await getSettings(env);
   const canViewMonthCalendar = user.role === "admin" || settings.show_leave_month_calendar;
-  const [units, staff, assignments, leaveDays, nextWeekLeaveDays, monthLeaveDays, auditLogs, rotations, pendingLeaves] = await Promise.all([
+  const [units, staff, assignments, leaveDays, nextWeekLeaveDays, monthLeaveDays, rotations, pendingLeaves] = await Promise.all([
     listUnits(env),
     listStaff(env),
     listAssignments(env, days),
     listLeaveDays(env, days),
     listLeaveDays(env, nextWeekDays),
     canViewMonthCalendar ? listLeaveDays(env, [monthStart, monthEnd], true) : Promise.resolve([]),
-    listAuditLogs(env, weekStart, days[6], auditFiltersForUser(user)),
     listRotations(env),
-    listPendingLeaves(env, days, user)
+    listPendingLeaves(env, user)
   ]);
   const visibleLeaveDays = (items: LeaveDay[]) => user.role === "admin"
     ? items
@@ -619,7 +640,6 @@ async function getSchedule(env: Env, url: URL, user: User): Promise<Response> {
     leaveDays: visibleLeaveDays(leaveDays),
     nextWeekLeaveDays: visibleLeaveDays(nextWeekLeaveDays),
     monthLeaveDays: visibleLeaveDays(monthLeaveDays),
-    auditLogs,
     rotations,
     pendingLeaves,
     approveLeaveBs: settings.approve_leave_bs,
@@ -1022,10 +1042,19 @@ async function saveRotation(request: Request, env: Env, user: User, unitId: numb
   if (!isIsoDate(startDate) || !Array.isArray(turns) || turns.length === 0 || turns.some((turn) => !Array.isArray(turn) || turn.length === 0)) {
     throw new HttpError(400, "Cần ngày bắt đầu và ít nhất một tua.");
   }
+  if (turns.some((turn) => turn.some((staffId) => !Number.isInteger(staffId) || staffId <= 0))) {
+    throw new HttpError(400, "Nhân sự trong tua không hợp lệ.");
+  }
+  const staffIds = [...new Set(turns.flat())];
+  const staffLookup = rotationStaffLookup(staffIds);
+  const { results: staffRows } = await env.DB.prepare(staffLookup.sql).bind(...staffLookup.bindings).all<StaffRow>();
+  const staffById = new Map(staffRows.map((row) => [row.id, mapStaffRow(row)]));
+  const missingStaffId = staffIds.find((staffId) => !staffById.has(staffId));
+  if (missingStaffId !== undefined) throw new HttpError(404, "Không tìm thấy nhân sự.");
   for (const turn of turns) {
     if (new Set(turn).size !== turn.length) throw new HttpError(400, "Một nhân sự không thể xuất hiện hai lần trong cùng một tua.");
     for (const staffId of turn) {
-      const staff = await getStaffById(env, staffId);
+      const staff = staffById.get(staffId)!;
       if (!acceptsStaffTypeForUnit(unit.type, staff.type)) throw new HttpError(400, `${staff.name} không đúng loại nhân sự cho ${unit.label}.`);
     }
     if (unit.maxPerDay !== null && turn.length > unit.maxPerDay) {
@@ -1038,13 +1067,9 @@ async function saveRotation(request: Request, env: Env, user: User, unitId: numb
      ON CONFLICT(unit_id) DO UPDATE SET start_date = excluded.start_date, mode = excluded.mode, enabled = 1, updated_by = excluded.updated_by, updated_at = CURRENT_TIMESTAMP`
   ).bind(unitId, startDate, mode, user.id);
   const deleteMembersStatement = env.DB.prepare("DELETE FROM unit_rotation_members WHERE unit_id = ?").bind(unitId);
-  const statements = turns.flatMap((turn, turnIndex) =>
-    turn.map((staffId, memberOrder) =>
-      env.DB.prepare("INSERT INTO unit_rotation_members (unit_id, turn_index, staff_id, member_order) VALUES (?, ?, ?, ?)")
-        .bind(unitId, turnIndex, staffId, memberOrder)
-    )
-  );
-  await env.DB.batch([rotationStatement, deleteMembersStatement, ...statements]);
+  const membersInsert = rotationMembersInsert(unitId, turns);
+  const membersStatement = env.DB.prepare(membersInsert.sql).bind(...membersInsert.bindings);
+  await env.DB.batch([rotationStatement, deleteMembersStatement, membersStatement]);
   await audit(env, user.id, "save", "rotation", unitId, `Lưu tua trực: ${unit.label}`);
   return json({ ok: true });
 }
@@ -1061,23 +1086,34 @@ async function applyRotation(request: Request, env: Env, user: User, unitId: num
   const days = Array.from({ length: weekCount * 7 }, (_, index) => addDays(weekStart, index));
   const statements: PostgresPreparedStatement[] = [];
   const allAssignments = await listAssignments(env, days);
-  const allLeaveDays = await listLeaveDays(env, days);
-  const leaveSet = new Set(allLeaveDays.map((day) => `${day.staffId}:${day.date}`));
+  const requestedLeaveDays = await listRequestedLeaveStaffDays(env, days);
   const postDutyOffDays = await listPostDutyOffDays(env, unit, days);
+  const skipped: string[] = [];
+  let skippedLeaveDays = 0;
   for (const date of days) {
     const idx = rotationTurnIndex(rotation.startDate, date, rotation.mode, turns.length);
     const staffIds = turns[idx].map((member) => member.staffId);
     for (const [slot, staffId] of staffIds.entries()) {
-      if (postDutyOffDays.has(`${staffId}:${date}`) || leaveSet.has(`${staffId}:${date}`)) continue;
+      if (postDutyOffDays.has(`${staffId}:${date}`)) continue;
+      if (requestedLeaveDays.has(`${staffId}:${date}`)) {
+        skippedLeaveDays += 1;
+        continue;
+      }
       const staff = await getStaffById(env, staffId);
+      // Leave is already owned by requestedLeaveDays above, so only the structural checks are left
+      // here. A single unusable cell (inactive staff, wrong staff type, ...) must not abort the
+      // whole rotation either: skip that day and report it, like leave and post-duty days.
       const msg = validateAssignmentInput({
         unit,
         staff,
         date,
         assignments: allAssignments.filter((a) => !(a.unitId === unitId && a.date === date)),
-        leaveDays: allLeaveDays
+        leaveDays: []
       });
-      if (msg) throw new HttpError(400, `${date}: ${msg}`);
+      if (msg) {
+        skipped.push(`${formatDate(date)} ${staff.name}: ${msg}`);
+        continue;
+      }
       statements.push(
         env.DB.prepare(
           "INSERT INTO schedule_assignments (unit_id, date, staff_id, slot, created_by, updated_by) VALUES (?, ?, ?, ?, ?, ?)"
@@ -1088,8 +1124,19 @@ async function applyRotation(request: Request, env: Env, user: User, unitId: num
   const deleteStatement = env.DB.prepare("DELETE FROM schedule_assignments WHERE unit_id = ? AND date BETWEEN ? AND ?")
     .bind(unitId, days[0], days[days.length - 1]);
   await env.DB.batch([deleteStatement, ...statements]);
-  await audit(env, user.id, "apply", "rotation", unitId, `Áp dụng tua ${unit.label} tuần ${weekStart}`);
-  return json({ ok: true });
+  const skipNote = [
+    skippedLeaveDays ? `bỏ qua ${skippedLeaveDays} ngày nghỉ phép` : "",
+    skipped.length ? `bỏ qua ${skipped.length} ngày không hợp lệ` : ""
+  ].filter(Boolean).join(", ");
+  await audit(
+    env,
+    user.id,
+    "apply",
+    "rotation",
+    unitId,
+    `Áp dụng tua ${unit.label} tuần ${weekStart}${skipNote ? ` (${skipNote})` : ""}`
+  );
+  return json({ ok: true, skippedLeaveDays, skipped });
 }
 
 async function listPostDutyOffDays(env: Env, unit: ScheduleUnit, days: string[]): Promise<Set<string>> {
@@ -1393,7 +1440,7 @@ async function cancelLeave(env: Env, user: User, id: number): Promise<Response> 
   const row = await env.DB.prepare(
     `SELECT lr.id, lr.staff_id, s.name
      FROM leave_requests lr JOIN staff s ON s.id = lr.staff_id
-     WHERE lr.id = ? AND lr.status = 'approved'`
+     WHERE lr.id = ? AND lr.status IN ('approved', 'pending')`
   ).bind(id).first<{ id: number; staff_id: number; name: string }>();
   if (!row) throw new HttpError(404, "Không tìm thấy đơn nghỉ phép.");
   if (user.role !== "admin" && user.staffId !== row.staff_id) {
@@ -1442,25 +1489,20 @@ async function cancelLeaveDay(env: Env, user: User, id: number): Promise<Respons
 }
 
 async function getAudit(env: Env, url: URL, user: User): Promise<Response> {
-  const weekStart = normalizeWeekStart(url.searchParams.get("weekStart"));
-  const days = getWeekDays(weekStart);
   const filters = auditFiltersForUser(user, url);
-  return json({ auditLogs: await listAuditLogs(env, days[0], days[6], filters) });
+  const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit")) || 20));
+  const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
+  const { logs, total } = await listAuditLogs(env, filters, { limit, offset: (page - 1) * limit });
+  return json({ auditLogs: logs, total, page, limit });
 }
 
-async function deleteAuditEndpoint(env: Env, url: URL, user: User): Promise<Response> {
+async function deleteAuditEndpoint(env: Env, user: User): Promise<Response> {
   requireAdmin(user);
-  const weekStart = normalizeWeekStart(url.searchParams.get("weekStart"));
-  const days = getWeekDays(weekStart);
-
-  await env.DB.prepare(
-    `DELETE FROM audit_logs
-     WHERE created_at >= (?::date AT TIME ZONE 'Asia/Ho_Chi_Minh')
-       AND created_at < ((?::date + 1) AT TIME ZONE 'Asia/Ho_Chi_Minh')`
-  ).bind(days[0], days[6]).run();
-
-  await audit(env, user.id, "delete", "audit_log", null, `Xóa lịch sử thay đổi tuần ${weekStart}`);
-  return json({ ok: true });
+  const result = await env.DB.prepare("DELETE FROM audit_logs").run();
+  const deleted = result.meta.changes;
+  // Logged after the wipe so the deletion itself stays on record.
+  await audit(env, user.id, "delete", "audit_log", null, `Xóa toàn bộ lịch sử thay đổi (${deleted} dòng)`);
+  return json({ ok: true, deleted });
 }
 
 function auditFiltersForUser(user: User, url?: URL): { actor?: string; action?: string; q?: string; actorUserId?: number; relatedUserId?: number; relatedStaffId?: number } {
@@ -1555,17 +1597,28 @@ async function listLeaveDays(env: Env, dates: string[], rawRange = false): Promi
   return results.map(mapLeaveDayRow);
 }
 
+/**
+ * Days a staff member is unavailable because of leave: approved leave plus leave that has been
+ * requested and is still waiting for approval. Scheduling somebody on a day they already asked off
+ * would otherwise block the admin from approving that request later on.
+ */
+async function listRequestedLeaveStaffDays(env: Env, days: string[]): Promise<Set<string>> {
+  const { results } = await env.DB.prepare(
+    `SELECT ld.staff_id, ld.date
+     FROM leave_days ld
+     JOIN leave_requests lr ON lr.id = ld.request_id
+     WHERE ld.date BETWEEN ? AND ? AND lr.status IN ('approved', 'pending')`
+  ).bind(days[0], days[days.length - 1]).all<{ staff_id: number; date: string }>();
+  return new Set((results || []).map((row) => `${row.staff_id}:${row.date}`));
+}
+
 async function listAuditLogs(
   env: Env,
-  start: string,
-  end: string,
-  filters: { actor?: string; action?: string; q?: string; actorUserId?: number; relatedUserId?: number; relatedStaffId?: number } = {}
-): Promise<AuditLog[]> {
-  const where = [
-    "al.created_at >= (?::date AT TIME ZONE 'Asia/Ho_Chi_Minh')",
-    "al.created_at < ((?::date + 1) AT TIME ZONE 'Asia/Ho_Chi_Minh')"
-  ];
-  const params: unknown[] = [start, end];
+  filters: { actor?: string; action?: string; q?: string; actorUserId?: number; relatedUserId?: number; relatedStaffId?: number } = {},
+  page: { limit: number; offset: number } = { limit: 20, offset: 0 }
+): Promise<{ logs: AuditLog[]; total: number }> {
+  const where = ["TRUE"];
+  const params: unknown[] = [];
   if (filters.actorUserId) {
     where.push("al.actor_user_id = ?");
     params.push(filters.actorUserId);
@@ -1599,15 +1652,17 @@ async function listAuditLogs(
     where.push("(al.summary LIKE ? OR al.entity_type LIKE ?)");
     params.push(`%${filters.q}%`, `%${filters.q}%`);
   }
-  const { results } = await env.DB.prepare(
-    `SELECT al.id, u.username AS actor_username, al.action, al.entity_type, al.entity_id, al.summary, al.created_at
-     FROM audit_logs al
-     LEFT JOIN users u ON u.id = al.actor_user_id
-     WHERE ${where.join(" AND ")}
-     ORDER BY al.created_at DESC, al.id DESC
-     LIMIT 100`
-  ).bind(...params).all<AuditRow>();
-  return results.map(mapAuditRow);
+  const from = `FROM audit_logs al LEFT JOIN users u ON u.id = al.actor_user_id WHERE ${where.join(" AND ")}`;
+  const [rows, count] = await Promise.all([
+    env.DB.prepare(
+      `SELECT al.id, u.username AS actor_username, al.action, al.entity_type, al.entity_id, al.summary, al.created_at
+       ${from}
+       ORDER BY al.created_at DESC, al.id DESC
+       LIMIT ? OFFSET ?`
+    ).bind(...params, page.limit, page.offset).all<AuditRow>(),
+    env.DB.prepare(`SELECT COUNT(*)::int AS total ${from}`).bind(...params).first<{ total: number }>()
+  ]);
+  return { logs: rows.results.map(mapAuditRow), total: count?.total ?? 0 };
 }
 
 async function audit(
@@ -1896,24 +1951,21 @@ async function getBlockedDates(env: Env): Promise<string[]> {
   return (results || []).map((r) => r.date);
 }
 
-async function listPendingLeaves(env: Env, dates: string[], user: User): Promise<Array<{ id: number; staffId: number; staffName: string; staffType: StaffType; reason: string | null; dates: string[] }>> {
-  const start = dates[0];
-  const end = dates[dates.length - 1];
+// Pending requests are listed regardless of the viewed week so they never disappear while waiting.
+async function listPendingLeaves(env: Env, user: User): Promise<PendingLeave[]> {
   if (user.role !== "admin" && !user.staffId) return [];
-  const pendingFilter = user.role === "admin"
-    ? ""
-    : " AND ld.date BETWEEN ? AND ? AND lr.staff_id = ?";
-  const params: Array<string | number> = user.role === "admin" ? [] : [start, end, user.staffId!];
+  const pendingFilter = user.role === "admin" ? "" : " AND lr.staff_id = ?";
+  const params: number[] = user.role === "admin" ? [] : [user.staffId!];
   const { results } = await env.DB.prepare(
-    `SELECT lr.id, lr.staff_id, s.name AS staff_name, s.type AS staff_type, lr.reason, ld.date
+    `SELECT lr.id, lr.staff_id, s.name AS staff_name, s.type AS staff_type, lr.reason, lr.created_at, ld.date
      FROM leave_requests lr
      JOIN staff s ON s.id = lr.staff_id
      JOIN leave_days ld ON ld.request_id = lr.id
      WHERE lr.status = 'pending'${pendingFilter}
      ORDER BY lr.created_at, ld.date, s.name`
-  ).bind(...params).all<{ id: number; staff_id: number; staff_name: string; staff_type: StaffType; reason: string | null; date: string }>();
+  ).bind(...params).all<{ id: number; staff_id: number; staff_name: string; staff_type: StaffType; reason: string | null; created_at: string; date: string }>();
 
-  const map = new Map<number, { id: number; staffId: number; staffName: string; staffType: StaffType; reason: string | null; dates: string[] }>();
+  const map = new Map<number, PendingLeave>();
   for (const row of results || []) {
     if (!map.has(row.id)) {
       map.set(row.id, {
@@ -1922,6 +1974,7 @@ async function listPendingLeaves(env: Env, dates: string[], user: User): Promise
         staffName: row.staff_name,
         staffType: row.staff_type,
         reason: row.reason,
+        registeredAt: row.created_at,
         dates: []
       });
     }

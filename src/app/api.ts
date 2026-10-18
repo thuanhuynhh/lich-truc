@@ -98,22 +98,21 @@ export const api = {
     }),
   deleteUser: (id: number) => request<{ users: User[] }>(`/api/users/${id}`, { method: "DELETE" }),
   users: () => request<{ users: User[] }>("/api/users"),
-  audit: (weekStart: string, filters: { actor?: string; action?: string; q?: string } = {}) => {
-    const params = new URLSearchParams({ weekStart });
-    Object.entries(filters).forEach(([key, value]) => {
-      if (value) params.set(key, value);
+  audit: (query: { actor?: string; action?: string; q?: string; page?: number; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    Object.entries(query).forEach(([key, value]) => {
+      if (value) params.set(key, String(value));
     });
-    return request<{ auditLogs: AuditLog[] }>(`/api/audit?${params.toString()}`);
+    return request<{ auditLogs: AuditLog[]; total: number }>(`/api/audit?${params.toString()}`);
   },
-  clearAudit: (weekStart: string) =>
-    request<{ ok: boolean }>(`/api/audit?weekStart=${weekStart}`, { method: "DELETE" }),
+  clearAudit: () => request<{ ok: boolean; deleted: number }>("/api/audit", { method: "DELETE" }),
   saveRotation: (unitId: number, body: { startDate: string; mode: RotationMode; turns: number[][] }) =>
     request<{ ok: boolean }>(`/api/rotations/${unitId}`, {
       method: "PUT",
       body: JSON.stringify(body)
     }),
   applyRotation: (unitId: number, body: { weekStart: string; weeks?: number }) =>
-    request<{ ok: boolean }>(`/api/rotations/${unitId}/apply`, {
+    request<{ ok: boolean; skippedLeaveDays: number; skipped: string[] }>(`/api/rotations/${unitId}/apply`, {
       method: "POST",
       body: JSON.stringify(body)
     }),
