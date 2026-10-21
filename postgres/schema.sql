@@ -29,6 +29,8 @@ CREATE TABLE staff (
   name TEXT NOT NULL,
   type TEXT NOT NULL CHECK (type IN ('BS', 'KTV', 'TKYK')),
   active SMALLINT NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  leave_balance INTEGER CHECK (leave_balance >= 0),
+  leave_balance_from DATE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (name, type)

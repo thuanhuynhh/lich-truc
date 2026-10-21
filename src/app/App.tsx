@@ -1717,6 +1717,10 @@ function LeaveView({
     ? getLeaveDateBlockReason(selectedStaff, day, data.leaveDays, 2)
     : "Hãy chọn nhân sự trước.";
   const hasBlockedSelectedDate = dates.some((day) => !!selectedDateBlockReason(day));
+  const leaveAvailable = selectedStaff?.leaveRemaining == null
+    ? null
+    : selectedStaff.leaveRemaining - (selectedStaff.leaveBooked ?? 0);
+  const exceedsLeaveBalance = leaveAvailable !== null && dates.length > leaveAvailable;
 
   useEffect(() => {
     leaveMonthRequest.current += 1;
@@ -1990,9 +1994,20 @@ function LeaveView({
             Lý do
             <textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={3} />
           </label>
-          <button type="submit" className="primary-btn" disabled={!staffId || dates.length === 0 || hasBlockedSelectedDate}>
-            <Plus size={16} /> Gửi nghỉ phép
-          </button>
+          <div className="leave-submit-row">
+            <button type="submit" className="primary-btn" disabled={!staffId || dates.length === 0 || hasBlockedSelectedDate || exceedsLeaveBalance}>
+              <Plus size={16} /> Gửi nghỉ phép
+            </button>
+            {selectedStaff?.leaveRemaining != null && (
+              <span
+                className={`leave-balance${exceedsLeaveBalance ? " over" : ""}`}
+                title={`Đã đăng ký sắp tới ${selectedStaff.leaveBooked ?? 0} ngày, có thể xin thêm ${Math.max(leaveAvailable ?? 0, 0)} ngày`}
+              >
+                Còn <strong>{selectedStaff.leaveRemaining}</strong> ngày phép
+                {(selectedStaff.leaveBooked ?? 0) > 0 && ` (đã đăng ký ${selectedStaff.leaveBooked})`}
+              </span>
+            )}
+          </div>
         </form>
       </section>
 
@@ -2115,13 +2130,13 @@ function StaffView({
   staff: Staff[];
   onCreate: (payload: { familyMiddleName: string; name: string; type: StaffType }) => void;
   onToggle: (staff: Staff) => void;
-  onUpdate: (id: number, payload: { familyMiddleName: string; name: string; type: StaffType }) => void;
+  onUpdate: (id: number, payload: { familyMiddleName: string; name: string; type: StaffType; leaveBalance?: number | null }) => void;
   onDelete: (id: number) => void;
 }) {
   const [familyMiddleName, setFamilyMiddleName] = useState("");
   const [name, setName] = useState("");
   const [type, setType] = useState<StaffType>("BS");
-  const [editing, setEditing] = useState<Record<number, { familyMiddleName: string; name: string; type: StaffType }>>({});
+  const [editing, setEditing] = useState<Record<number, { familyMiddleName: string; name: string; type: StaffType; leaveBalance: string }>>({});
   return (
     <main className="content-grid">
       <section className="panel">
@@ -2158,6 +2173,7 @@ function StaffView({
             <span role="columnheader">Họ và tên đệm</span>
             <span role="columnheader">Tên</span>
             <span role="columnheader">Loại</span>
+            <span role="columnheader">Ngày phép</span>
             <span role="columnheader">Trạng thái</span>
             <span role="columnheader">Thao tác</span>
           </div>
@@ -2183,12 +2199,26 @@ function StaffView({
                     <option value="KTV">KTV</option>
                     <option value="TKYK">TKYK</option>
                   </select>
+                  <input
+                    type="number"
+                    min={0}
+                    max={365}
+                    step={1}
+                    value={editing[item.id].leaveBalance}
+                    placeholder="Không theo dõi"
+                    title="Số ngày phép còn lại tính đến hết hôm nay; ngày phép từ ngày mai sẽ được trừ khi đến. Để trống nếu không theo dõi."
+                    aria-label={`Số ngày phép của ${item.name}`}
+                    onChange={(event) => setEditing((prev) => ({ ...prev, [item.id]: { ...prev[item.id], leaveBalance: event.target.value } }))}
+                  />
                 </>
               ) : (
                 <>
                   <span>{item.familyMiddleName || "—"}</span>
                   <strong>{item.name}</strong>
                   <span>{item.type}</span>
+                  <span title={item.leaveBalance == null ? undefined : `Cấp ${item.leaveBalance} ngày · đã đăng ký sắp tới ${item.leaveBooked ?? 0} ngày`}>
+                    {item.leaveBalance == null ? "—" : `Còn ${item.leaveRemaining ?? item.leaveBalance}/${item.leaveBalance}`}
+                  </span>
                 </>
               )}
               <span className={item.active ? "status-ok" : "status-off"}>{item.active ? "Đang dùng" : "Đã tắt"}</span>
@@ -2199,10 +2229,13 @@ function StaffView({
                     className="tool-btn"
                     onClick={() => {
                       const next = editing[item.id];
+                      const leaveBalance = next.leaveBalance.trim() === "" ? null : Number(next.leaveBalance);
+                      const leaveBalanceChanged = leaveBalance !== (item.leaveRemaining ?? null);
                       if (next.name.trim()) onUpdate(item.id, {
                         familyMiddleName: next.familyMiddleName.trim(),
                         name: next.name.trim(),
-                        type: next.type
+                        type: next.type,
+                        ...(leaveBalanceChanged ? { leaveBalance } : {})
                       });
                       setEditing((prev) => {
                         const copy = { ...prev };
@@ -2216,7 +2249,12 @@ function StaffView({
                 ) : (
                   <button type="button" className="tool-btn" onClick={() => setEditing((prev) => ({
                     ...prev,
-                    [item.id]: { familyMiddleName: item.familyMiddleName, name: item.name, type: item.type }
+                    [item.id]: {
+                      familyMiddleName: item.familyMiddleName,
+                      name: item.name,
+                      type: item.type,
+                      leaveBalance: item.leaveRemaining == null ? "" : String(item.leaveRemaining)
+                    }
                   }))}>
                     Sửa
                   </button>

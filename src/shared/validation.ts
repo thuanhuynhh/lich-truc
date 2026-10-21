@@ -126,3 +126,11 @@ export function leaveSummaryByType(leaveDays: LeaveDay[], date: string, type: St
     .map((day) => day.staffName)
     .join(", ");
 }
+
+/** Returns an error when the requested days exceed the leave not yet used or already booked. */
+export function leaveBalanceError(params: { remaining: number; booked: number; dates: string[] }): string | null {
+  const available = params.remaining - params.booked;
+  if (params.dates.length <= available) return null;
+  return `Không đủ ngày phép: còn ${params.remaining} ngày, đã đăng ký trước ${params.booked} ngày, `
+    + `chỉ có thể xin thêm ${Math.max(available, 0)} ngày (đang xin ${params.dates.length} ngày).`;
+}

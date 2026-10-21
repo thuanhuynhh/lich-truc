@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getAuditActionValues } from "../src/shared/audit";
-import { canEditDutyReport, formatStaffFullName, getLeaveDateBlockReason, hasReportSignature, isReportRole, resolveReportSignerName, validateAssignmentInput, validateLeaveInput } from "../src/shared/validation";
+import { canEditDutyReport, formatStaffFullName, getLeaveDateBlockReason, hasReportSignature, isReportRole, leaveBalanceError, resolveReportSignerName, validateAssignmentInput, validateLeaveInput } from "../src/shared/validation";
 import type { Assignment, LeaveDay, ScheduleUnit, Staff, StaffType } from "../src/shared/types";
 
 const dutyBs: ScheduleUnit = {
@@ -202,5 +202,21 @@ describe("schedule validation", () => {
       [leave(1, 10, staffType, "2026-07-16"), leave(2, 11, staffType, "2026-07-16")]
     );
     expect(error).toContain(`đã đủ 2 ${staffType}`);
+  });
+});
+
+describe("leaveBalanceError", () => {
+  it("allows requests within remaining days minus booked days", () => {
+    expect(leaveBalanceError({ remaining: 5, booked: 3, dates: ["2026-11-02", "2026-11-03"] })).toBeNull();
+  });
+
+  it("blocks requests exceeding remaining days minus booked days", () => {
+    expect(leaveBalanceError({ remaining: 5, booked: 4, dates: ["2026-11-02", "2026-11-03"] }))
+      .toContain("chỉ có thể xin thêm 1 ngày");
+  });
+
+  it("blocks every request when the balance is overdrawn", () => {
+    expect(leaveBalanceError({ remaining: -1, booked: 0, dates: ["2026-11-02"] }))
+      .toContain("chỉ có thể xin thêm 0 ngày");
   });
 });

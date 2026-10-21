@@ -80,7 +80,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body)
     }),
-  updateStaff: (id: number, body: Partial<{ familyMiddleName: string; name: string; type: StaffType; active: boolean }>) =>
+  updateStaff: (id: number, body: Partial<{ familyMiddleName: string; name: string; type: StaffType; active: boolean; leaveBalance: number | null }>) =>
     request<{ staff: Staff[] }>(`/api/staff/${id}`, {
       method: "PATCH",
       body: JSON.stringify(body)

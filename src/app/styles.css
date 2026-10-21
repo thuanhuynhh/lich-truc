@@ -1457,7 +1457,7 @@ button:focus-visible {
 .staff-table-head,
 .staff-row {
   display: grid;
-  grid-template-columns: minmax(150px, 1.25fr) minmax(90px, .8fr) 80px 100px minmax(150px, auto);
+  grid-template-columns: minmax(150px, 1.25fr) minmax(90px, .8fr) 80px 110px 100px minmax(150px, auto);
   gap: 10px;
   align-items: center;
 }
@@ -1483,6 +1483,22 @@ button:focus-visible {
 
 .staff-row:nth-child(odd) {
   background: var(--surface-2);
+}
+
+.leave-submit-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.leave-balance {
+  color: var(--muted, #475569);
+  font-size: .9rem;
+}
+
+.leave-balance.over {
+  color: #b91c1c;
 }
 
 .staff-actions {

@@ -20,6 +20,12 @@ export interface Staff {
   name: string;
   type: StaffType;
   active: boolean;
+  /** Leave days granted by the admin; null when leave is not tracked for this staff member. */
+  leaveBalance?: number | null;
+  /** Granted days minus approved leave days that have already arrived. */
+  leaveRemaining?: number | null;
+  /** Approved or pending leave days that have not arrived yet. */
+  leaveBooked?: number;
 }
 
 export interface ScheduleUnit {

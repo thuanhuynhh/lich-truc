@@ -16,7 +16,7 @@ import type {
 } from "../shared/types";
 import { acceptsStaffTypeForUnit, addDays, conflictsWithDutyLeave, getWeekDays, normalizeWeekStart, postDutyOffDate, shouldSyncPostDutyOffDate, getDayOfWeekLabel, formatDate, isIsoDate, rotationTurnIndex, todayInVietnam, workRotationAssignmentsForDates, workRotationAssignmentsForStaff } from "../shared/schedule";
 import { getAuditActionValues } from "../shared/audit";
-import { isReportRole, resolveReportSignerName, validateAssignmentInput, validateLeaveInput } from "../shared/validation";
+import { isReportRole, resolveReportSignerName, leaveBalanceError, validateAssignmentInput, validateLeaveInput } from "../shared/validation";
 import { PostgresDatabase, type PostgresPreparedStatement, createPostgresClient } from "./database";
 
 interface Env {
@@ -274,10 +274,29 @@ async function updateProfile(request: Request, env: Env, user: SessionUser): Pro
   return json({ user: publicUser(mapUserRow(updated)) });
 }
 
+/**
+ * Leave balance columns. `leave_balance` is the number of days left at the end of
+ * `leave_balance_from`; approved leave days after that date are deducted once they arrive.
+ * `leave_booked` counts days already requested (approved or pending) that have not arrived yet.
+ */
+const STAFF_LEAVE_COLUMNS = `
+  s.leave_balance,
+  s.leave_balance - (
+    SELECT COUNT(*) FROM leave_days ld JOIN leave_requests lr ON lr.id = ld.request_id
+    WHERE ld.staff_id = s.id AND lr.status = 'approved' AND ld.date > s.leave_balance_from AND ld.date <= ?
+  ) AS leave_remaining,
+  (
+    SELECT COUNT(*) FROM leave_days ld JOIN leave_requests lr ON lr.id = ld.request_id
+    WHERE ld.staff_id = s.id AND ld.date > s.leave_balance_from
+      AND ((lr.status = 'approved' AND ld.date > ?) OR (lr.status = 'pending' AND ld.date >= ?))
+  ) AS leave_booked`;
+
 async function listStaff(env: Env): Promise<Staff[]> {
+  const today = todayInVietnam();
   const { results } = await env.DB.prepare(
-    "SELECT id, family_middle_name, name, type, active FROM staff ORDER BY active DESC, type, name"
-  ).all<StaffRow>();
+    `SELECT s.id, s.family_middle_name, s.name, s.type, s.active, ${STAFF_LEAVE_COLUMNS}
+     FROM staff s ORDER BY s.active DESC, s.type, s.name`
+  ).bind(today, today, today).all<StaffRow>();
   return results.map(mapStaffRow);
 }
 
@@ -299,13 +318,25 @@ async function createStaff(request: Request, env: Env, user: User): Promise<Resp
 
 async function updateStaff(request: Request, env: Env, user: User, id: number): Promise<Response> {
   requireAdmin(user);
-  const body = await readJson<{ familyMiddleName?: string; name?: string; type?: StaffType; active?: boolean }>(request);
+  const body = await readJson<{ familyMiddleName?: string; name?: string; type?: StaffType; active?: boolean; leaveBalance?: number | null }>(request);
   const current = await getStaffById(env, id);
+  const leaveBalance = body.leaveBalance;
+  if (leaveBalance !== undefined && leaveBalance !== null && (!Number.isInteger(leaveBalance) || leaveBalance < 0 || leaveBalance > 365)) {
+    throw new HttpError(400, "Số ngày phép phải là số nguyên từ 0 đến 365.");
+  }
   const familyMiddleName = String(body.familyMiddleName ?? current.familyMiddleName).trim();
   const name = String(body.name ?? current.name).trim();
   const type = body.type ?? current.type;
   const active = body.active === undefined ? current.active : !!body.active;
   if (!name || !isStaffType(type)) throw new HttpError(400, "Dữ liệu nhân sự không hợp lệ.");
+  if (leaveBalance !== undefined) {
+    await env.DB.prepare("UPDATE staff SET leave_balance = ?, leave_balance_from = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+      .bind(leaveBalance, leaveBalance === null ? null : todayInVietnam(), id)
+      .run();
+    await audit(env, user.id, "update", "staff", id, leaveBalance === null
+      ? `Bỏ theo dõi ngày phép: ${current.name}`
+      : `Đặt số ngày phép ${current.name}: ${leaveBalance} ngày`);
+  }
   await env.DB.prepare("UPDATE staff SET family_middle_name = ?, name = ?, type = ?, active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
     .bind(familyMiddleName, name, type, active ? 1 : 0, id)
     .run();
@@ -635,7 +666,9 @@ async function getSchedule(env: Env, url: URL, user: User): Promise<Response> {
     weekStart,
     days,
     units,
-    staff,
+    staff: user.role === "admin"
+      ? staff
+      : staff.map((item) => item.id === user.staffId ? item : { ...item, leaveBalance: null, leaveRemaining: null, leaveBooked: 0 }),
     assignments,
     leaveDays: visibleLeaveDays(leaveDays),
     nextWeekLeaveDays: visibleLeaveDays(nextWeekLeaveDays),
@@ -1360,6 +1393,7 @@ async function createLeave(request: Request, env: Env, user: User): Promise<Resp
   const message = validateLeaveInput({ staff, dates, leaveDays, limitPerType: 2 });
   if (message) throw new HttpError(400, message);
   await assertNoDutyLeaveConflicts(env, staff.id, dates);
+  await assertLeaveBalance(env, staff.id, dates);
 
   // Determine status based on settings
   const settings = await getSettings(env);
@@ -1404,6 +1438,20 @@ async function createLeave(request: Request, env: Env, user: User): Promise<Resp
   const summaryText = status === "pending" ? `Đăng ký nghỉ phép (chờ duyệt) ${staff.name}: ${dates.join(", ")}` : `Nghỉ phép ${staff.name}: ${dates.join(", ")}`;
   await audit(env, user.id, "create", "leave", requestId, summaryText);
   return json({ ok: true, pending: status === "pending" }, 201);
+}
+
+async function assertLeaveBalance(env: Env, staffId: number, dates: string[]): Promise<void> {
+  const today = todayInVietnam();
+  const row = await env.DB.prepare(
+    `SELECT s.leave_balance_from, ${STAFF_LEAVE_COLUMNS} FROM staff s WHERE s.id = ?`
+  ).bind(today, today, today, staffId).first<{ leave_balance_from: string | null; leave_remaining: number | null; leave_booked: number }>();
+  if (!row || row.leave_remaining === null || !row.leave_balance_from) return;
+  const message = leaveBalanceError({
+    remaining: Number(row.leave_remaining),
+    booked: Number(row.leave_booked),
+    dates: dates.filter((date) => date > row.leave_balance_from!)
+  });
+  if (message) throw new HttpError(400, message);
 }
 
 async function assertNoDutyLeaveConflicts(env: Env, staffId: number, dates: string[]): Promise<void> {
@@ -1801,6 +1849,9 @@ interface StaffRow {
   name: string;
   type: StaffType;
   active: number;
+  leave_balance?: number | null;
+  leave_remaining?: number | null;
+  leave_booked?: number | null;
 }
 
 interface UnitRow {
@@ -1876,7 +1927,10 @@ function mapStaffRow(row: StaffRow): Staff {
     familyMiddleName: row.family_middle_name,
     name: row.name,
     type: row.type,
-    active: !!row.active
+    active: !!row.active,
+    leaveBalance: row.leave_balance ?? null,
+    leaveRemaining: row.leave_remaining ?? null,
+    leaveBooked: Number(row.leave_booked ?? 0)
   };
 }
 
